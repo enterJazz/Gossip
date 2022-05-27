@@ -1,1 +1,5 @@
-/target
+# rust specific
+target/
+
+# IDE specific
+.idea/
