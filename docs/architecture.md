@@ -65,3 +65,65 @@ peer ..> "broadcast" i_p2p
 
 @enduml
 ```
+
+## Communication
+
+### API-Comm
+
+#### Communication Flow
+```plantuml
+@startuml
+' participants
+'' datatype : [Conn]
+participant Publisher as pub
+database TopicTxListMap as kv
+participant APIServer as api
+participant Handler as handler
+participant Submodule as sub
+
+' interactions (chronological)
+== initiate connection ==
+api --> api: listen
+sub --> api: connect
+activate api
+api --> api: accept
+api --> handler **: delegate connection
+deactivate api
+
+== Subscribe (GossipNotify) ==
+sub --> handler: `GossipNotify` (sub)
+activate handler
+handler --> kv: push tx conn to topic (data type)
+deactivate handler
+
+== Publish (GossipNotification) ==
+pub --> api: publish data of topic
+activate pub
+activate api
+api --> kv: get TxList of topic
+api --> handler: write topic data to txs
+activate handler
+deactivate api
+handler --> sub: `GossipNotification` (pub)
+deactivate handler
+pub --> pub: wait for Submodule Validation Response
+sub --> handler: `GossipValidation` (valid)
+activate handler
+handler --> api: send Validation payload
+deactivate handler
+activate api
+api --> pub: forward payload
+deactivate api
+deactivate pub
+
+== Broadcast (GossipAnnounce) ==
+sub --> handler: `GossipAnnounce` (broadcast)
+activate handler
+handler --> api: forward announce payload
+activate api
+deactivate handler
+api --> broadcaster: forward announce payload
+deactivate api
+
+@enduml
+```

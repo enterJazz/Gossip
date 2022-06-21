@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use clap::Parser;
 use env_logger;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 struct Args {
