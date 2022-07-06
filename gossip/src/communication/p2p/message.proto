@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package gossip.communicator.p2p.message;
+
+enum MsgTypes {
+  VERIFICATION_REQUEST = 0;
+  VERIFICATION_RESPONSE = 1;
+  DATA = 2;
+  TEST = 3;
+}
+
+message VerificationRequest {
+  bytes challenge = 1;
+  bytes pub_key = 2;
+}
+
+message VerificationResponse {
+  bytes challenge = 1;
+  bytes pub_key = 2;
+  bytes nonce = 3;
+}
+
+message Data { bytes payload = 1; }
+
+message Envelope {
+  oneof msg {
+    VerificationRequest verificationRequest = 1;
+    VerificationResponse verificationResponse = 2;
+    Data data = 3;
+  }
+}
