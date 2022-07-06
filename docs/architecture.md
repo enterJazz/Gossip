@@ -31,7 +31,6 @@ node "host" as host {
         }
 
         [Proof-of-Work] as pow
-        [Validator] as valid
         [Publisher] as pub
         [Broadcaster] as broadc
         
@@ -39,7 +38,6 @@ node "host" as host {
         broadc ..>  "validate pow" pow
         ' NOTE pub returns error if valid fails
         broadc ..> "publish" pub
-        pub ..> "validate" valid
         
         ' external gossip module comms
         pub ..> "publish" api

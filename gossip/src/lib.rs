@@ -3,3 +3,4 @@ mod communication;
 mod proof_of_work;
 mod publisher;
 mod validator;
+mod common;

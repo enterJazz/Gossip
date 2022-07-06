@@ -12,6 +12,16 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+use thiserror::Error;
+use tokio::sync::mpsc::{Receiver, Sender};
+
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("no subscribers for topic {topic}")]
+    NoSubscribers { topic: u16 },
+}
+
 /// Server listener state. Created in the `run` call. It includes a `run` method
 /// which performs the TCP listening and initialization of per-connection state.
 #[derive(Debug)]
@@ -73,7 +83,7 @@ struct Handler {
 pub async fn run(
     listener: TcpListener,
     pub_api_rx: mpsc::Receiver<ApiMessage>,
-    api_pub_tx: mpsc::Sender<Result<ApiMessage, ()>>,
+    api_pub_tx: mpsc::Sender<Result<ApiMessage, Error>>,
 ) {
     // Initialize the listener state
     let (tx, rx) = mpsc::channel(512);
@@ -97,7 +107,7 @@ impl Listener {
     async fn run(
         &mut self,
         mut pub_api_rx: mpsc::Receiver<ApiMessage>,
-        mut api_pub_tx: mpsc::Sender<Result<ApiMessage, ()>>,
+        mut api_pub_tx: mpsc::Sender<Result<ApiMessage, Error>>,
     ) {
         info!("API SERVER: accepting inbound connections");
 
@@ -139,8 +149,8 @@ impl Listener {
                                 let mut tx_vec = match db.get(&m_sub.data_type) {
                                     Some(tx_vec) => tx_vec,
                                     None => {
-                                        warn!("no subscribers found for topic {}", m_sub.data_type);
-                                        api_pub_tx.send(Err(()));
+                                        warn!("no subscribers found for topic {}", &m_sub.data_type);
+                                        api_pub_tx.send(Err(Error::NoSubscribers {topic: m_sub.data_type})).await.unwrap();
                                         return;
                                     }
                                 };
@@ -168,8 +178,8 @@ impl Listener {
 
                             // check that we did not remove all txs
                             if tx_vec_cp.is_empty() {
-                                warn!("no subscribers found for topic {}", m_sub.data_type);
-                                api_pub_tx.send(Err(()));
+                                warn!("no subscribers found for topic {}", &m_sub.data_type);
+                                api_pub_tx.send(Err(Error::NoSubscribers {topic: m_sub.data_type})).await.unwrap();
                                 return;
                             }
 
