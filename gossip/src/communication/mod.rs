@@ -1,2 +1,2 @@
-mod p2p;
 mod api;
+pub mod p2p;
