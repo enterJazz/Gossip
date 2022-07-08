@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use super::payload::{
     announce::Announce, notification::Notification, notify::Notify, validation::Validation,
+    rps::peer::Peer,
 };
 
 #[derive(Error, Debug)]
@@ -32,15 +33,19 @@ pub enum MessageType {
     GossipNotify = 501,
     GossipNotification = 502,
     GossipValidation = 503,
+    RPSQuery = 540,
+    RPSPeer = 541,
 }
 
-/// An API Gossip message.
+/// An API message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApiMessage {
     Announce(Announce),
     Notification(Notification),
     Notify(Notify),
     Validation(Validation),
+    RPSQuery,
+    RPSPeer(Peer),
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,8 @@ impl ApiMessage {
             MessageType::GossipNotification => {
                 ApiMessage::Notification(Notification::parse(src, header.size)?)
             }
+            MessageType::RPSQuery => ApiMessage::RPSQuery,
+            MessageType::RPSPeer => ApiMessage::RPSPeer(Peer::parse(src, header.size)?),
         })
     }
 
@@ -78,6 +85,10 @@ impl ApiMessage {
             ApiMessage::Validation(_) => Err(Error::Unexpected {
                 message_type: MessageType::GossipValidation,
             }),
+            ApiMessage::RPSQuery => Ok(vec![]),
+            ApiMessage::RPSPeer(peer) => Err(Error::Unexpected {
+                message_type: MessageType::RPSPeer,
+            }),
         }
     }
 
@@ -90,18 +101,12 @@ impl ApiMessage {
 
     pub fn get_size(&self) -> Result<u16, Error> {
         match self {
-            ApiMessage::Notification(n) => {
-                Ok(n.get_size())
-            }
-            ApiMessage::Announce(_) => {
-                Err(Unexpected { message_type: MessageType::GossipAnnounce })
-            }
-            ApiMessage::Notify(_) => {
-                Err(Unexpected { message_type: MessageType::GossipNotify })
-            }
-            ApiMessage::Validation(_) => {
-                Err(Unexpected { message_type: MessageType::GossipValidation })
-            }
+            ApiMessage::Notification(n) => Ok(n.get_size()),
+            ApiMessage::RPSQuery => Ok(0),
+            ApiMessage::Announce(_) => Err(Unexpected { message_type: MessageType::GossipAnnounce }),
+            ApiMessage::Notify(_) => Err(Unexpected { message_type: MessageType::GossipNotify }),
+            ApiMessage::Validation(_) => Err(Unexpected { message_type: MessageType::GossipValidation }),
+            ApiMessage::RPSPeer(_) => Err(Unexpected { message_type: MessageType::RPSPeer }),
         }
     }
 }
@@ -126,6 +131,12 @@ impl Header {
                 })
             }
             ApiMessage::Validation(_) => {
+                return Err(Error::Unexpected {
+                    message_type: MessageType::GossipValidation,
+                })
+            }
+            ApiMessage::RPSQuery => MessageType::RPSQuery,
+            ApiMessage::RPSPeer(_) => {
                 return Err(Error::Unexpected {
                     message_type: MessageType::GossipValidation,
                 })

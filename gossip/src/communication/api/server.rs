@@ -4,12 +4,13 @@
 //! spawning a task per connection.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use crate::communication::api::connection::Connection;
 use crate::communication::api::message::ApiMessage;
-use log::{debug, info, warn};
+use log::{debug, info, warn, error};
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use thiserror::Error;
@@ -41,6 +42,13 @@ struct Listener {
     /// Handler sends results to API through this tx
     /// Copied per send.
     handler_api_tx: mpsc::Sender<ApiMessage>,
+
+    /// API to RPS Connection Handler Transmitter.
+    /// Connected to by API server upon initiation.
+    api_rps_tx: mpsc::Sender<ApiMessage>,
+
+    /// RPS to API Server Receiver.
+    rps_api_rx: mpsc::Receiver<ApiMessage>,
 }
 
 /// Per-connection handler. Reads requests from `connection` and applies the
@@ -84,19 +92,44 @@ pub async fn run(
     listener: TcpListener,
     pub_api_rx: mpsc::Receiver<ApiMessage>,
     api_pub_tx: mpsc::Sender<Result<ApiMessage, Error>>,
+    broadcaster_api_rx: mpsc::Receiver<ApiMessage>,
+    api_broadcaster_tx: mpsc::Sender<Result<ApiMessage, Error>>,
+    rps_address: SocketAddr,
 ) {
+    let db = Arc::new(Mutex::new(HashMap::new()));
+
     // Initialize the listener state
-    let (tx, rx) = mpsc::channel(512);
+    let (rps_api_tx, rps_api_rx) = mpsc::channel(512);
+    let (api_rps_tx, api_rps_rx) = mpsc::channel(512);
+
+    // connect to the RPS
+    let rps_conn = Connection::new(TcpStream::connect(rps_address).await.unwrap());
+    let mut rps_handler = Handler {
+        db: db.clone(),
+        connection: rps_conn,
+        api_handler_tx: api_rps_tx.clone(),
+        api_handler_rx: api_rps_rx,
+        subscribed_topics: vec![],
+        handler_api_tx: rps_api_tx,
+    };
+
+    tokio::spawn(async move {
+        rps_handler.run().await;
+    });
+
+    let (handler_api_tx, handler_api_rx) = mpsc::channel(512);
     let mut server = Listener {
         listener,
-        handler_api_rx: rx,
-        db_holder: Arc::new(Mutex::new(HashMap::new())),
-        handler_api_tx: tx,
+        handler_api_rx,
+        db_holder: db.clone(),
+        handler_api_tx,
+        api_rps_tx: api_rps_tx.clone(),
+        rps_api_rx,
     };
 
     // transmitter must be given to publisher
     // idea: publisher passes receiver upon run
-    server.run(pub_api_rx, api_pub_tx).await;
+    server.run(pub_api_rx, api_pub_tx, broadcaster_api_rx, api_broadcaster_tx).await;
 }
 
 impl Listener {
@@ -108,13 +141,21 @@ impl Listener {
         &mut self,
         mut pub_api_rx: mpsc::Receiver<ApiMessage>,
         mut api_pub_tx: mpsc::Sender<Result<ApiMessage, Error>>,
+        mut broadcaster_api_rx: mpsc::Receiver<ApiMessage>,
+        mut api_broadcaster_tx: mpsc::Sender<Result<ApiMessage, Error>>,
     ) {
         info!("API SERVER: accepting inbound connections");
 
         loop {
             tokio::select! {
                 res = self.listener.accept() => {
-                    let (socket, addr) = res.unwrap();
+                    let (socket, addr) = match res {
+                        Ok(res) => res,
+                        Err(e) => {
+                            error!("API SERVER: failed to connect with listener: {:?}", e);
+                            continue;
+                        }
+                    };
                     info!("API SERVER: received connection from {:?}", addr);
                     let connection = Connection::new(socket);
 
@@ -139,23 +180,38 @@ impl Listener {
                 }
 
                 message = pub_api_rx.recv() => {
-                    info!("API SERVER: received message from api");
-                    let message = message.unwrap();
+                    info!("API SERVER: received message from publisher");
+                    let message = match message {
+                        Some(message) => message,
+                        None => {
+                            error!("API Server: received NONE message from publisher! Ignoring...");
+                            continue;
+                        }
+                    };
                     match &message {
                         ApiMessage::Notification(m_sub) => {
                             let mut tx_vec_cp;
+                            let mut api_pub_tx_send = None;
                             {
                                 let db = self.db_holder.lock().unwrap();
-                                let mut tx_vec = match db.get(&m_sub.data_type) {
-                                    Some(tx_vec) => tx_vec,
+                                let tx_vec = db.get(&m_sub.data_type);
+                                tx_vec_cp = match tx_vec {
+                                    Some(tx_vec) => tx_vec.clone(),
                                     None => {
                                         warn!("no subscribers found for topic {}", &m_sub.data_type);
-                                        api_pub_tx.send(Err(Error::NoSubscribers {topic: m_sub.data_type})).await.unwrap();
-                                        return;
+                                        api_pub_tx_send = Some(api_pub_tx.send(Err(Error::NoSubscribers {topic: m_sub.data_type})));
+                                        vec![]
                                     }
                                 };
-                                tx_vec_cp = tx_vec.clone();
                             }
+                            // had to move this here due to issues with awaiting a send during DB lock
+                            match api_pub_tx_send {
+                                Some(send) => {
+                                    send.await.unwrap();
+                                    return
+                                },
+                                None => {}
+                            };
 
                             for i in 0..tx_vec_cp.len() {
                                 let mut tx = tx_vec_cp.get_mut(i).unwrap();
@@ -191,11 +247,49 @@ impl Listener {
 
                 message = self.handler_api_rx.recv() => {
                     info!("API SERVER: received message from handler");
-                    let message = message.unwrap();
+                     let message = match message {
+                        Some(message) => message,
+                        None => {
+                            error!("API Server: received NONE from handler");
+                            continue;
+                        }
+                    };
                     match &message {
                         ApiMessage::Announce(_) | ApiMessage::Validation(_) => {
                             api_pub_tx.send(Ok(message)).await.unwrap();
                         }
+                        _ => panic!("message {:?} not meant to be handled by API", message),
+                    }
+                }
+
+                // RPS communication
+                // Broadcaster -> API -> RPS Handler
+                message = broadcaster_api_rx.recv() => {
+                    info!("API SERVER: received message from broadcaster");
+                    let message = match message {
+                        Some(message) => message,
+                        None => {
+                            error!("API Server: received NONE from broadcaster");
+                            continue;
+                        }
+                    };
+                    match &message {
+                        ApiMessage::RPSQuery => self.api_rps_tx.send(message).await.unwrap(),
+                        _ => panic!("message {:?} not meant to be handled by API", message),
+                    }
+                }
+                // RPS Handler -> API -> broadcaster
+                message = self.rps_api_rx.recv() => {
+                    info!("API SERVER: received message from RPS handler");
+                    let message = match message {
+                        Some(message) => message,
+                        None => {
+                            error!("API Server: received NONE from RPS handler");
+                            continue;
+                        }
+                    };
+                    match &message {
+                        ApiMessage::RPSPeer(_) => api_broadcaster_tx.send(Ok(message)).await.unwrap(),
                         _ => panic!("message {:?} not meant to be handled by API", message),
                     }
                 }
@@ -214,7 +308,15 @@ impl Handler {
             // handler either reads a message or receives a notification from the api
             tokio::select! {
                 maybe_message = self.connection.read_message() => {
-                    let message = maybe_message.unwrap();
+                    let message = match maybe_message.unwrap() {
+                        Some(m) => m,
+                        None => {
+                            info!("API HANDLER: Connection closed gracefully");
+                            self.shutdown();
+                            break
+                        }
+                    };
+                    // if message is None, connection closed gracefully
                     debug!("API HANDLER: handling connection message {:?}", &message);
                     self.handle_incoming(message).await;
                 }
@@ -227,18 +329,11 @@ impl Handler {
         }
     }
 
-    async fn handle_incoming(&mut self, maybe_message: Option<ApiMessage>) {
+    async fn handle_incoming(&mut self, message: ApiMessage) {
         // If `None` is returned from `read_message()` then the peer closed
         // the socket. There is no further work to do and the task can be
         // terminated.
         // NOTE handler could be destroyed after connection is dropped
-        let message = match maybe_message {
-            Some(message) => message,
-            None => return,
-        };
-
-        debug!("incoming: {:?}", message);
-
         match &message {
             ApiMessage::Notify(m_sub) => {
                 // subscription message
@@ -253,7 +348,7 @@ impl Handler {
                     self.subscribed_topics.push(m_sub.data_type);
                 }
             }
-            ApiMessage::Validation(_) | ApiMessage::Announce(_) => {
+            ApiMessage::Validation(_) | ApiMessage::Announce(_) | ApiMessage::RPSPeer(_) => {
                 self.handler_api_tx.send(message).await.unwrap();
             }
             _ => panic!(
@@ -267,10 +362,15 @@ impl Handler {
         debug!("outgoing: {:?}", payload);
         self.connection.write_message(payload).await.unwrap();
     }
+
+    fn shutdown(&mut self) {
+        self.api_handler_rx.close();
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::thread;
     use std::time::Duration;
     use bytes::Bytes;
@@ -279,27 +379,103 @@ mod tests {
     use crate::communication::api::message::MessageType::GossipNotify;
     use crate::communication::api::payload::notification::Notification;
     use crate::communication::api::server::run;
-    use log::{debug, info};
+    use log::{debug, info, warn};
+    use num_traits::FromPrimitive;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
     use crate::communication::api::payload::notify::Notify;
+    use crate::communication::api::payload::rps::peer::{Module, Peer, PortMapRecord};
 
-    const TEST_ADDR: &str = "localhost:1337";
+    const API_TEST_ADDR: &str = "0.0.0.0:1337";
+    const RPS_TEST_ADDR: &str = "0.0.0.0:1338";
+
+    async fn run_mock_rps() {
+        let mut mock_rps_peer_msg: Vec<u8> = vec![];
+
+        let mock_rps_peer_msg_payload: Vec<u8> = vec![
+            0, 0, // port 0
+            2, // # portmap
+            0, // reserved + V (IpV4)
+            0b00000010, 0b10001010, // App 1: DHT (650)
+            0, 0, // App 1 port 0
+            0b00000010, 0b00001000, // App 2: NSE (520)
+            0, 0, // App 2 port 0
+            0, 0, 0, 0, // Ipv4 Addr: 0.0.0.0
+            0b00000001, 0b00000001, 0b00000001, 0b00000001, // some bytes which could be a peer's DER host key
+        ];
+
+        let payload_size: u8 = u8::from_usize(*&mock_rps_peer_msg_payload.len()).unwrap();
+        let mock_rps_peer_header: Vec<u8> = vec![
+            0, (payload_size + 2), // size
+            0b00000010, 0b00011101, // message code: RPS PEER (541)
+        ];
+
+        mock_rps_peer_msg.extend(mock_rps_peer_header);
+        mock_rps_peer_msg.extend(mock_rps_peer_msg_payload);
+
+        let rps_listener = TcpListener::bind(RPS_TEST_ADDR).await.unwrap();
+
+        loop {
+            let (mut stream, _) = rps_listener.accept().await.unwrap();
+
+            let peer_msg = mock_rps_peer_msg.clone();
+            tokio::spawn(async move {
+                // read query
+                let mut buf = [0u8; 4];
+                stream.read_exact(&mut buf).await.unwrap();
+
+                // write response
+                stream.write(&peer_msg).await.unwrap();
+                stream.flush().await.unwrap();
+            });
+
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_api_interaction() {
         env_logger::init();
         // run api
-        let listener = TcpListener::bind(TEST_ADDR).await.unwrap();
+        let api_listener = TcpListener::bind(API_TEST_ADDR).await.unwrap();
 
-        let (test_server_tx, test_server_rx) = mpsc::channel(512);
-        let (server_test_tx, server_test_rx) = mpsc::channel(512);
+        let (test_pub_server_tx, test_pub_server_rx) = mpsc::channel(512);
+        let (server_test_pub_tx, server_test_pub_rx) = mpsc::channel(512);
+
+        let (test_broadcaster_server_tx, test_broadcaster_server_rx) = mpsc::channel(512);
+        let (server_test_broadcaster_tx, mut server_test_broadcaster_rx) = mpsc::channel(512);
+        let rps_address: SocketAddr = RPS_TEST_ADDR.to_string().parse().unwrap();
+
+        debug!("starting mock rps server");
+        tokio::spawn(async {
+            run_mock_rps().await;
+        });
+
+        // wait until server available
+        let mut count = 0;
+        loop {
+            match TcpStream::connect(RPS_TEST_ADDR).await {
+                Ok(_) => break,
+                Err(_) => {
+                    count += 1;
+                    if count > 5 {
+                        panic!("unable to connect to rps server");
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
 
         debug!("starting api server");
         tokio::spawn(async move {
-            run(listener, test_server_rx, server_test_tx).await;
+            run(api_listener,
+                test_pub_server_rx,
+                server_test_pub_tx,
+                test_broadcaster_server_rx,
+                server_test_broadcaster_tx,
+            rps_address).await;
         });
+
 
         // serialized messages to send
         // subscription
@@ -308,7 +484,7 @@ mod tests {
         // let gossip_announce: Vec<u8> = vec![];
 
         // connect to api
-        let mut stream = TcpStream::connect(TEST_ADDR).await.unwrap();
+        let mut stream = TcpStream::connect(API_TEST_ADDR).await.unwrap();
 
         // send notify (subscription) message
         info!("sending notify to test over socket");
@@ -325,17 +501,46 @@ mod tests {
         // send valid notification (publish) from test to server
         // check that socket receives notification
 
-        // wait until notify arrives before sending notification
         thread::sleep(Duration::from_secs(1));
 
         info!("TEST: sending notification message to server to write back to test over socket");
-        test_server_tx.send(msg.clone()).await.unwrap();
+        test_pub_server_tx.send(msg.clone()).await.unwrap();
 
         info!("TEST: reading message from server");
         let mut conn = Connection::new(stream);
         let read_msg = conn.read_message().await.unwrap().unwrap();
 
+        info!("sending notify to test over socket");
 
         assert_eq!(msg, read_msg);
+
+        // test RPS interaction
+        let rps_query = ApiMessage::RPSQuery;
+        test_broadcaster_server_tx.send(rps_query).await.unwrap();
+
+        let recv_msg = server_test_broadcaster_rx.recv().await.unwrap().unwrap();
+
+        // expected message:
+
+        let bytes: Vec<u8> = vec![1, 1, 1, 1];
+        let data = Bytes::from(bytes);
+        let check_msg = ApiMessage::RPSPeer(
+            Peer {
+                address: "0.0.0.0:0".parse().unwrap(),
+                port_map_records: vec![
+                    PortMapRecord {
+                        module: Module::DHT,
+                        port: 0,
+                    },
+                    PortMapRecord {
+                        module: Module::NSE,
+                        port: 0,
+                    },
+                ],
+                host_key: data,
+            }
+        );
+
+        assert_eq!(recv_msg, check_msg);
     }
 }

@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Display};
 use bytes::{Buf, Bytes};
 use std::io::Cursor;
 use log::debug;
@@ -7,6 +8,12 @@ use thiserror::Error;
 pub enum Error {
     #[error("not enough data available to parse message")]
     Incomplete,
+
+    #[error("unknown value for field {}: {}", field_name, value)]
+    Unknown {
+        field_name: String,
+        value: String,
+    }
 }
 
 pub fn get_u8(src: &mut Cursor<&[u8]>) -> Result<u8, Error> {

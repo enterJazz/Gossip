@@ -6,12 +6,12 @@
 @startuml
 
 ' other peer
-() "UDP" as i_peer
+() "TCP" as i_peer
 node "peer" as peer
 i_peer - "listen" peer
 
 ' host peer
-() "UDP" as i_p2p
+() "TCP" as i_p2p
 node "host" as host {
     node "other module" as other_mod
     
