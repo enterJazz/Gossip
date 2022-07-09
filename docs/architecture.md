@@ -15,11 +15,14 @@ i_peer - "listen" peer
 node "host" as host {
     node "other module" as other_mod
     
-    () "UDP" as i_rps
+    () "TCP" as i_api
+    
+    () "TCP" as i_rps
     node "RPS" as rps
     rps - "listen" i_rps
+    rps -> "send peer" i_api
+ 
     
-    () "TCP" as i_api
     node "gossip" {
         package "communication" {
             [P2P] as p2p
@@ -77,24 +80,24 @@ participant Publisher as pub
 database TopicTxListMap as kv
 participant APIServer as api
 participant Handler as handler
-participant Submodule as sub
+participant Module as mod
 
 ' interactions (chronological)
-== initiate connection ==
+== Initiate connection ==
 api --> api: listen
-sub --> api: connect
+mod --> api: connect
 activate api
 api --> api: accept
 api --> handler **: delegate connection
 deactivate api
 
-== Subscribe (GossipNotify) ==
-sub --> handler: `GossipNotify` (sub)
+== Subscribe (GOSSIP NOTIFY) ==
+mod --> handler: `GOSSIP NOTIFY` (sub)
 activate handler
 handler --> kv: push tx conn to topic (data type)
 deactivate handler
 
-== Publish (GossipNotification) ==
+== Publish (GOSSIP NOTFICIATION) ==
 pub --> api: publish data of topic
 activate pub
 activate api
@@ -102,10 +105,10 @@ api --> kv: get TxList of topic
 api --> handler: write topic data to txs
 activate handler
 deactivate api
-handler --> sub: `GossipNotification` (pub)
+handler --> mod: `GOSSIP NOTFICIATION` (pub)
 deactivate handler
-pub --> pub: wait for Submodule Validation Response
-sub --> handler: `GossipValidation` (valid)
+pub --> pub: wait for Module Validation Response
+mod --> handler: `GOSSIP VALIDATION` (valid)
 activate handler
 handler --> api: send Validation payload
 deactivate handler
@@ -114,13 +117,13 @@ api --> pub: forward payload
 deactivate api
 deactivate pub
 
-== Broadcast (GossipAnnounce) ==
-sub --> handler: `GossipAnnounce` (broadcast)
+== Broadcast (GOSSIP ANNOUNCE) ==
+mod --> handler: `GOSSIP ANNOUNCE` (broadcast)
 activate handler
 handler --> api: forward announce payload
 activate api
 deactivate handler
-api --> broadcaster: forward announce payload
+api --> Broadcaster: forward announce payload
 deactivate api
 
 @enduml
