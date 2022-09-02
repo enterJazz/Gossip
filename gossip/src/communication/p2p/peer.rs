@@ -1,28 +1,28 @@
 use crate::communication::p2p::message::{envelope, Envelope, VerificationRequest};
-use log::{debug, error, info, log_enabled, Level};
+use bytes::BytesMut;
+use log::{debug, error, info, log_enabled, warn, Level};
+use prost::Message;
+use std::error::Error;
+use std::str;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{tcp, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 
-use prost::Message;
-#[derive(Debug, Clone)]
-pub struct PeerError(pub String);
-
 /// Shorthand for the receive half of the message channel.
-type Rx = mpsc::UnboundedReceiver<String>;
+type RxStreamHalf = Arc<Mutex<tcp::OwnedReadHalf>>;
+type TxStreamHalf = Arc<Mutex<tcp::OwnedWriteHalf>>;
 
-impl PeerError {
-    // utility method to log peer information
-    pub fn err_with_peer(msg: String, peer: &Peer) -> Self {
-        return PeerError(format!(
-            "peer error: {} (addr:{}, status: {}) ",
-            msg,
-            peer.get_addr(),
-            peer.status.to_string()
-        ));
-    }
+#[derive(Error, Debug)]
+pub enum PeerError {
+    #[error("peer error: connection failed")]
+    Connection(),
+    #[error("peer error: challenge failed")]
+    Challenge(),
+    #[error("peer error: could not read message")]
+    Read(#[from] RecvError),
 }
 
 #[derive(Error, Debug)]
@@ -32,6 +32,16 @@ pub enum RecvError {
     #[error("stream read error")]
     Read(#[from] io::Error),
     #[error("read invalid length {0}")]
+    InvalidLength(usize),
+}
+
+#[derive(Error, Debug)]
+pub enum SendError {
+    #[error("protoc encode error")]
+    Encode(#[from] prost::EncodeError),
+    #[error("stream write error")]
+    Write(#[from] io::Error),
+    #[error("write invalid length {0}")]
     InvalidLength(usize),
 }
 
@@ -61,27 +71,35 @@ impl PeerConnectionStatus {
 }
 
 pub struct Peer {
-    pub socket: Arc<Mutex<TcpStream>>,
+    pub rx: RxStreamHalf,
+    pub tx: TxStreamHalf,
     pub status: PeerConnectionStatus,
     addr: SocketAddr,
+
+    // buffer for reading messages.
+    read_buffer: BytesMut,
 }
 
 impl Peer {
-    pub async fn new(socket: TcpStream) -> Self {
-        let addr = socket.local_addr().unwrap();
+    pub fn new(stream: TcpStream) -> Self {
+        let addr = stream.local_addr().unwrap();
+
+        let (mut rx, mut tx) = TcpStream::into_split(stream);
 
         return Peer {
-            socket: Arc::new(Mutex::new(socket)),
+            rx: Arc::new(Mutex::new(rx)),
+            tx: Arc::new(Mutex::new(tx)),
             addr,
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
+            read_buffer: BytesMut::with_capacity(8 * 1024),
         };
     }
 
     pub async fn new_from_addr(addr: SocketAddr) -> PeerResult<Self> {
         match TcpStream::connect(addr).await {
-            Ok(socket) => Ok(Peer::new(socket).await),
-            Err(e) => Err(PeerError("could not connect".to_string())),
+            Ok(socket) => Ok(Peer::new(socket)),
+            Err(e) => Err(PeerError::Connection()),
         }
     }
 
@@ -91,39 +109,73 @@ impl Peer {
         Ok(())
     }
 
+    // initiate a connection process to the remote defined by the underlying TCP Stream
     pub async fn connect(&mut self) -> PeerResult<()> {
+        let rx = self.rx.clone();
+
+        debug!("p2p/peer/connect: reading message from {}", self.get_addr());
+
+        // TODO: handle errors
+        let env = self.read_msg().await?;
+
+        debug!("p2p/peer/connect: finished reading message");
+
+        let msg = match env.msg {
+            Some(envelope::Msg::VerificationRequest(req)) => req.challenge,
+            _ => return Err(PeerError::Challenge()),
+        };
+
+        info!(
+            "P2P peer: got challenge value: {}",
+            str::from_utf8(&msg.to_vec()).unwrap()
+        );
+
+        Ok(())
+    }
+
+    // initiate the connection process by publishing challenge to the other party defined by the underlying
+    // TCP Stream
+    pub async fn challenge(&mut self) -> PeerResult<()> {
         let challenge_req = Envelope {
             msg: Some(envelope::Msg::VerificationRequest(VerificationRequest {
                 challenge: "test".as_bytes().to_vec(),
                 pub_key: "bla".as_bytes().to_vec(),
             })),
         };
-        if let Err(err) = Peer::send_msg(self.socket.clone(), challenge_req).await {
-            error!("failed to send challenge {}", err.to_string());
-            return Err(PeerError("challenge failed".to_string()));
+
+        if let Err(err) = self.send_msg(challenge_req).await {
+            error!("P2P peer: failed to send challenge {}", err.to_string());
+            return Err(PeerError::Challenge());
         }
 
-        let socket = self.socket.clone();
-        // wait for response
-        // TODO: add delay
-        tokio::spawn(async move { return Peer::read_msg(socket).await }).await;
+        info!("P2P peer: challenge send");
+
+        // TODO: handle responses
+        // let rx = self.rx.clone();
+        // // wait for response  // TODO: add delay
+        // tokio::spawn(async move { return Peer::read_msg(rx).await }).await;
 
         Ok(())
     }
 
-    pub async fn send_msg(socket: Arc<Mutex<TcpStream>>, msg: Envelope) -> io::Result<usize> {
-        let s = socket.lock().await;
+    pub async fn send_msg(&mut self, msg: Envelope) -> Result<(), SendError> {
+        let mut tx = self.tx.lock().await;
         let buf = msg.encode_to_vec();
-        return s.try_write(&buf);
+        match tx.write(&buf).await {
+            Ok(0) => Err(SendError::InvalidLength(0)),
+            Ok(n) => Ok(()),
+            Err(e) => Err(SendError::Write(e)),
+        }
     }
 
-    pub async fn read_msg(socket: Arc<Mutex<TcpStream>>) -> Result<Envelope, RecvError> {
-        let mut buf = [0; 8192];
-        let s = socket.lock().await;
+    pub async fn read_msg(&mut self) -> Result<Envelope, RecvError> {
+        info!("locking read");
+        let mut s = self.rx.lock().await;
+        info!("locked read");
 
-        match s.try_read(&mut buf) {
+        match s.read_buf(&mut self.read_buffer).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),
-            Ok(n) => match Envelope::decode(&buf[..n]) {
+            Ok(n) => match Envelope::decode(&self.read_buffer[..n]) {
                 Ok(msg) => Ok(msg),
                 Err(err) => Err(RecvError::Decode(err)),
             },
@@ -141,5 +193,35 @@ impl Peer {
     pub fn is_active(&self) -> bool {
         self.status == PeerConnectionStatus::Connected
             || self.status == PeerConnectionStatus::Connecting
+    }
+
+    pub async fn run(
+        &mut self,
+        mut tx: mpsc::Receiver<envelope::Msg>,
+        rx: mpsc::Sender<envelope::Msg>,
+    ) -> bool {
+        loop {
+            tokio::select! {
+                rx_envelope = self.read_msg() => {
+                    match rx_envelope {
+                        // TODO: remove optional wrapping aroung msg in envelope
+                        Ok(envelope) => rx.send(envelope.msg.unwrap()).await.unwrap(),
+                        Err(err) => warn!("failed to receive msg {}", err),
+                    }
+                }
+
+                tx_msg = tx.recv() => {
+                    let msg = tx_msg.unwrap();
+
+                    let env = Envelope{
+                        msg: Some(msg)
+                    };
+                    match self.send_msg(env).await {
+                        Ok(()) => debug!("msg send"),
+                        Err(err) => error!("failed to send {}", err)
+                    }
+                }
+            }
+        }
     }
 }

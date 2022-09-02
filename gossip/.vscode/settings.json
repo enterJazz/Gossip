@@ -1,0 +1,10 @@
+{
+  "debug.allowBreakpointsEverywhere": true,
+  "rust-analyzer.debug.engine": "ms-vscode.cpptools",
+  "rust-analyzer.debug.engineSettings": {
+    "cppdbg": {
+      "stopAtEntry": false,
+      "MIMode": "lldb" // required
+    }
+  }
+}

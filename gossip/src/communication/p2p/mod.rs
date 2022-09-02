@@ -1,4 +1,4 @@
-pub mod com;
+// pub mod com;
 pub mod peer;
 pub mod server;
 pub mod message {

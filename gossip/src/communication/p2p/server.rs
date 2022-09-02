@@ -1,20 +1,18 @@
-use crate::communication::p2p::peer::{Peer, PeerConnectionStatus, PeerError, PeerResult};
-use log::{debug, error, info};
+use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
-
-/// Shorthand for the transmit half of the message channel.
-type Tx = mpsc::UnboundedSender<String>;
+use tokio::sync::Mutex;
 
 struct ServerState {
-    peers: HashMap<SocketAddr, (Peer, Rx)>,
+    max_parallel_connections: usize,
+    peers: HashMap<SocketAddr, Peer>,
 }
 
 pub struct Server {
-    //  com: Communicator,
+    listener: TcpListener,
     state: Arc<Mutex<ServerState>>,
 }
 
@@ -23,82 +21,86 @@ impl ServerState {
     fn new() -> Self {
         ServerState {
             peers: HashMap::new(),
+            max_parallel_connections: 10,
         }
     }
 }
 
-impl Server {
-    pub async fn new() -> Result<Self, io::Error> {
-        Ok(Server {
-            state: Arc::new(Mutex::new(ServerState::new())),
-        })
+async fn accept_connection(state_ref: Arc<Mutex<ServerState>>, stream: TcpStream) {
+    let mut state = state_ref.lock().await;
+    // Close incomming connection if server has reached its maximum connection counter
+    if state.peers.keys().len() == state.max_parallel_connections {
+        debug!("p2p/server/accept_connection: max number connections reached closing");
+        return;
     }
+    state.max_parallel_connections = state.max_parallel_connections + 1;
 
-    pub async fn run(&mut self, addr: String) -> io::Result<()> {
-        let listener = TcpListener::bind(addr).await?;
+    // perform challenge acceptance in an async call to not block accept
+    let state_ref = state_ref.clone();
+    tokio::spawn(async move {
+        let mut peer = Peer::new(stream);
 
-        loop {
-            let (socket, _) = listener.accept().await?;
+        match peer.challenge().await {
+            Ok(resp) => {
+                info!("p2p/server/accept: completed challenge; result={:?}", resp);
+                let mut state = state_ref.lock().await;
 
-            // Clone a handle to the `Shared` state for the new connection.
-            let state = Arc::clone(&self.state);
-
-            tokio::spawn(async move {
-                Server::process_connection(state, socket);
-            });
-        }
-    }
-
-    pub async fn connect_with_addr(&mut self, addr: SocketAddr) -> PeerResult<()> {
-        // Clone a handle to the `Shared` state for the new connection.
-        let state = Arc::clone(&self.state);
-        match Peer::new_from_addr(addr).await {
-            Ok(peer) => Server::register_peer(state, peer).await,
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn process_connection(state: Arc<Mutex<ServerState>>, socket: TcpStream) {
-        let mut peer = Peer::new(socket).await;
-
-        if let Err(err) = Server::register_peer(state, peer).await {
-            error!("failed to register peer");
-            return;
-        }
-    }
-
-    async fn register_peer(state: Arc<Mutex<ServerState>>, mut peer: Peer) -> PeerResult<()> {
-        let mut state = state.lock().await;
-        let addr = peer.get_addr();
-        // check if peer is already connected
-        if let Some((old_peer, rx)) = state.peers.get(&addr) {
-            if old_peer.is_active() {
-                return Err(PeerError::err_with_peer(
-                    "trying to register an existing peer".to_string(),
-                    old_peer,
-                ));
+                // store peer state
+                state.peers.insert(peer.get_addr(), peer);
             }
-
-            // if peer is invalid remove and restart connection
-            state.peers.remove(&addr);
+            Err(err) => error!("p2p/server/accept: challenge failed {}", err),
         }
+    });
+}
 
-        peer.connect().await;
+impl Server {
+    pub async fn new(addr: SocketAddr) -> Self {
+        let listener = TcpListener::bind(addr).await.unwrap();
 
-        state.peers.insert(addr, peer);
-        Ok(())
+        Server {
+            state: Arc::new(Mutex::new(ServerState::new())),
+            listener: listener,
+        }
     }
 
-    pub async fn remove_peer(state: Arc<Mutex<ServerState>>, addr: SocketAddr) -> PeerResult<()> {
-        let mut state = state.lock().await;
-        if let Some(mut peer) = state.peers.remove(&addr) {
-            // peer.disconnect();
-        } else {
-            return Err(PeerError("remove failed peer not found".to_string()));
+    // connect to remote peer‚
+    pub async fn connect(&mut self, addr: SocketAddr) -> PeerResult<()> {
+        let mut peer = match Peer::new_from_addr(addr).await {
+            Err(e) => return Err(e),
+            Ok(peer) => peer,
+        };
+
+        match peer.connect().await {
+            Err(e) => return Err(e),
+            Ok(()) => info!("p2p/server/connect: connected to {}", addr),
+        };
+
+        // store connection on state
+        let r = self.state.clone();
+        let mut state = r.lock().await;
+        state.peers.insert(peer.get_addr(), peer);
+
+        info!("p2p/server/connect: peer {} added to active pool", addr);
+
+        Ok({})
+    }
+
+    pub async fn run(&mut self) -> io::Result<()> {
+        loop {
+            tokio::select! {
+                res = self.listener.accept() => {
+                    let (stream, addr) = match res {
+                        Ok(res) => res,
+                        Err(e) => {
+                            error!("p2p/server/accept: failed to connect with listener: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    info!("p2p/server/accept: incoming connection from {}", addr);
+                    accept_connection(self.state.clone(), stream).await;
+                }
+            }
         }
-
-        // TODO: add additional teardown
-
-        Ok(())
     }
 }

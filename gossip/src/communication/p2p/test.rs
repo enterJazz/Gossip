@@ -1,22 +1,31 @@
-// use crate::communication::p2p::com::Communicator;
+use crate::communication::p2p::server::Server;
 
-// #[cfg(test)]
-// #[tokio::test]
-// async fn p2p_comm_test() {
-//     let (s1, mut rx_s1) = Communicator::new("127.0.0.1:0".to_string(), 1)
-//         .await
-//         .unwrap();
-//     let (s2, mut rx_s2) = Communicator::new("127.0.0.1:0".to_string(), 1)
-//         .await
-//         .unwrap();
-//     let (s3, _) = Communicator::new("127.0.0.1:0".to_string(), 1)
-//         .await
-//         .unwrap();
+#[cfg(test)]
+#[tokio::test]
+async fn p2p_comm_test() {
+    let mut s1 = Server::new("127.0.0.1:1333".parse().unwrap()).await;
+    let mut s2 = Server::new("127.0.0.1:1334".parse().unwrap()).await;
+    let mut s3 = Server::new("127.0.0.1:1335".parse().unwrap()).await;
 
-//     let s1_addr = s1.local_addr().unwrap();
-//     let s2_addr = s2.local_addr().unwrap();
-//     let s3_addr = s3.local_addr().unwrap();
+    tokio::spawn(async move {
+        _ = s1.run().await;
+    });
 
+    _ = tokio::spawn(async move {
+        _ = match s2.connect("127.0.0.1:1333".parse().unwrap()).await {
+            Ok(()) => (),
+            Err(e) => {
+                panic!("failed to connect {}", e);
+            }
+        }
+    })
+    .await;
+
+    _ = tokio::spawn(async move {
+        _ = s3.connect("127.0.0.1:1333".parse().unwrap()).await;
+    })
+    .await;
+}
 //     let s1_payload_raw = "1. Hello world";
 //     let s2_payload_raw = "2. Hello world";
 //     let s3_payload_raw = "3. Hello world";
