@@ -1,19 +1,28 @@
 use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
 use log::{debug, error, info, warn};
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
+
+use super::message::envelope::Msg;
 
 struct ServerState {
     max_parallel_connections: usize,
-    peers: HashMap<SocketAddr, Peer>,
+    peers: HashMap<SocketAddr, PeerHandler>,
 }
 
 pub struct Server {
     listener: TcpListener,
     state: Arc<Mutex<ServerState>>,
+
+    tx_sender: mpsc::Sender<(Msg, SocketAddr)>,
+    tx_receiver: mpsc::Receiver<(Msg, SocketAddr)>,
+
+    broadcast_sender: mpsc::Sender<Msg>,
+    broadcast_receiver: mpsc::Receiver<Msg>,
 }
 
 impl ServerState {
@@ -23,6 +32,34 @@ impl ServerState {
             peers: HashMap::new(),
             max_parallel_connections: 10,
         }
+    }
+}
+
+struct PeerHandler {
+    msg_rx: mpsc::Receiver<Msg>,
+    msg_tx: mpsc::Sender<Msg>,
+    peer: Arc<Peer>,
+}
+
+impl PeerHandler {
+    fn new(peer: Peer) -> PeerHandler {
+        let (rx_write, rx_read) = mpsc::channel(512);
+        let (tx_write, tx_read) = mpsc::channel(512);
+
+        let p = Arc::new(peer);
+        let p_copy = p.clone();
+
+        tokio::spawn(async move {
+            p_copy.run(tx_read, rx_write).await;
+        });
+
+        let p = PeerHandler {
+            msg_rx: rx_read,
+            msg_tx: tx_write,
+            peer: p,
+        };
+
+        return p;
     }
 }
 
@@ -42,11 +79,15 @@ async fn accept_connection(state_ref: Arc<Mutex<ServerState>>, stream: TcpStream
 
         match peer.challenge().await {
             Ok(resp) => {
-                info!("p2p/server/accept: completed challenge; result={:?}", resp);
                 let mut state = state_ref.lock().await;
-
+                let addr = peer.get_addr();
+                info!(
+                    "p2p/server/accept: completed challenge; result={:?} addr={}",
+                    resp, addr
+                );
+                let handler = PeerHandler::new(peer);
                 // store peer state
-                state.peers.insert(peer.get_addr(), peer);
+                state.peers.insert(addr, handler);
             }
             Err(err) => error!("p2p/server/accept: challenge failed {}", err),
         }
@@ -57,14 +98,21 @@ impl Server {
     pub async fn new(addr: SocketAddr) -> Self {
         let listener = TcpListener::bind(addr).await.unwrap();
 
+        let (tx_sender, tx_receiver) = mpsc::channel(512);
+        let (broadcast_sender, broadcast_receiver) = mpsc::channel(512);
+
         Server {
             state: Arc::new(Mutex::new(ServerState::new())),
-            listener: listener,
+            listener,
+            broadcast_receiver,
+            broadcast_sender,
+            tx_receiver,
+            tx_sender,
         }
     }
 
     // connect to remote peer‚
-    pub async fn connect(&mut self, addr: SocketAddr) -> PeerResult<()> {
+    pub async fn connect(&self, addr: SocketAddr) -> PeerResult<()> {
         let mut peer = match Peer::new_from_addr(addr).await {
             Err(e) => return Err(e),
             Ok(peer) => peer,
@@ -78,14 +126,16 @@ impl Server {
         // store connection on state
         let r = self.state.clone();
         let mut state = r.lock().await;
-        state.peers.insert(peer.get_addr(), peer);
+        let handler = PeerHandler::new(peer);
+        // store peer state
+        state.peers.insert(addr, handler);
 
         info!("p2p/server/connect: peer {} added to active pool", addr);
 
         Ok({})
     }
 
-    pub async fn run(&mut self) -> io::Result<()> {
+    pub async fn run(&self) -> io::Result<()> {
         loop {
             tokio::select! {
                 res = self.listener.accept() => {
@@ -100,7 +150,21 @@ impl Server {
                     info!("p2p/server/accept: incoming connection from {}", addr);
                     accept_connection(self.state.clone(), stream).await;
                 }
+
+                // tx = self.broadcast_receiver.recv() => {
+
+                // }
             }
         }
     }
+
+    pub async fn print_conns(&self) {
+        let mut state = self.state.lock().await;
+
+        for (addr, peer) in &state.peers {
+            println!("connected to {}", addr)
+        }
+    }
+
+    pub async fn broadcast(&self, msg: Msg) {}
 }

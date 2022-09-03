@@ -6,6 +6,7 @@ use env_logger::Builder;
 use log::LevelFilter;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -32,12 +33,21 @@ async fn main() {
     let args = Args::parse();
     println!("Hello, world!");
 
-    let mut s1 = Server::new("127.0.0.1:1333".parse().unwrap()).await;
-    let mut s2 = Server::new("127.0.0.1:1334".parse().unwrap()).await;
-    let mut s3 = Server::new("127.0.0.1:1335".parse().unwrap()).await;
+    let s1 = Arc::new(Server::new("127.0.0.1:1333".parse().unwrap()).await);
+    let s2 = Arc::new(Server::new("127.0.0.1:1334".parse().unwrap()).await);
+    let s3 = Arc::new(Server::new("127.0.0.1:1335".parse().unwrap()).await);
 
+    let s1_run = s1.clone();
     tokio::spawn(async move {
-        _ = s1.run().await;
+        _ = s1_run.run().await;
+    });
+    let s2_run = s2.clone();
+    tokio::spawn(async move {
+        _ = s2_run.run().await;
+    });
+    let s3_run = s3.clone();
+    tokio::spawn(async move {
+        _ = s3_run.run().await;
     });
 
     _ = tokio::spawn(async move {
@@ -56,7 +66,17 @@ async fn main() {
             Err(e) => {
                 panic!("failed to connect {}", e);
             }
-        }
+        };
+        _ = match s3.connect("127.0.0.1:1334".parse().unwrap()).await {
+            Ok(()) => (),
+            Err(e) => {
+                panic!("failed to connect {}", e);
+            }
+        };
     })
     .await;
+
+    s1.print_conns().await;
+    // s2.print_conns().await;
+    // s3.print_conns().await;
 }

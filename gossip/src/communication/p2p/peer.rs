@@ -17,8 +17,8 @@ type TxStreamHalf = Arc<Mutex<tcp::OwnedWriteHalf>>;
 
 #[derive(Error, Debug)]
 pub enum PeerError {
-    #[error("peer error: connection failed")]
-    Connection(),
+    #[error("peer error: connection failed {0}")]
+    Connection(#[from] io::Error),
     #[error("peer error: challenge failed")]
     Challenge(),
     #[error("peer error: could not read message")]
@@ -82,7 +82,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(stream: TcpStream) -> Self {
-        let addr = stream.local_addr().unwrap();
+        let addr = stream.peer_addr().unwrap();
 
         let (mut rx, mut tx) = TcpStream::into_split(stream);
 
@@ -99,7 +99,7 @@ impl Peer {
     pub async fn new_from_addr(addr: SocketAddr) -> PeerResult<Self> {
         match TcpStream::connect(addr).await {
             Ok(socket) => Ok(Peer::new(socket)),
-            Err(e) => Err(PeerError::Connection()),
+            Err(e) => Err(PeerError::Connection(e)),
         }
     }
 
@@ -158,7 +158,7 @@ impl Peer {
         Ok(())
     }
 
-    pub async fn send_msg(&mut self, msg: Envelope) -> Result<(), SendError> {
+    pub async fn send_msg(&self, msg: Envelope) -> Result<(), SendError> {
         let mut tx = self.tx.lock().await;
         let buf = msg.encode_to_vec();
         match tx.write(&buf).await {
@@ -168,14 +168,13 @@ impl Peer {
         }
     }
 
-    pub async fn read_msg(&mut self) -> Result<Envelope, RecvError> {
-        info!("locking read");
+    pub async fn read_msg(&self) -> Result<Envelope, RecvError> {
         let mut s = self.rx.lock().await;
-        info!("locked read");
+        let mut buf = BytesMut::with_capacity(8 * 1024);
 
-        match s.read_buf(&mut self.read_buffer).await {
+        match s.read_buf(&mut buf).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),
-            Ok(n) => match Envelope::decode(&self.read_buffer[..n]) {
+            Ok(n) => match Envelope::decode(&buf[..n]) {
                 Ok(msg) => Ok(msg),
                 Err(err) => Err(RecvError::Decode(err)),
             },
@@ -196,7 +195,7 @@ impl Peer {
     }
 
     pub async fn run(
-        &mut self,
+        &self,
         mut tx: mpsc::Receiver<envelope::Msg>,
         rx: mpsc::Sender<envelope::Msg>,
     ) -> bool {
@@ -206,15 +205,22 @@ impl Peer {
                     match rx_envelope {
                         // TODO: remove optional wrapping aroung msg in envelope
                         Ok(envelope) => rx.send(envelope.msg.unwrap()).await.unwrap(),
-                        Err(err) => warn!("failed to receive msg {}", err),
+                        Err(err) => {
+                            warn!("failed to receive msg {}", err);
+                            continue;
+                        },
                     }
                 }
 
                 tx_msg = tx.recv() => {
-                    let msg = tx_msg.unwrap();
+                    if let None = tx_msg {
+                        // debug!("got empty message");
+                        continue;
+                    }
 
+                    debug!("sending data");
                     let env = Envelope{
-                        msg: Some(msg)
+                        msg: tx_msg,
                     };
                     match self.send_msg(env).await {
                         Ok(()) => debug!("msg send"),
