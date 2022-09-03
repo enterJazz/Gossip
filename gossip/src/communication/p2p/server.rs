@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use super::message::envelope::Msg;
 
@@ -21,8 +21,8 @@ pub struct Server {
     tx_sender: mpsc::Sender<(Msg, SocketAddr)>,
     tx_receiver: mpsc::Receiver<(Msg, SocketAddr)>,
 
-    broadcast_sender: mpsc::Sender<Msg>,
-    broadcast_receiver: mpsc::Receiver<Msg>,
+    broadcast_sender: broadcast::Sender<Msg>,
+    broadcast_receiver: broadcast::Receiver<Msg>,
 }
 
 impl ServerState {
@@ -42,15 +42,34 @@ struct PeerHandler {
 }
 
 impl PeerHandler {
-    fn new(peer: Peer) -> PeerHandler {
+    fn new(peer: Peer, mut broadcast_receiver: broadcast::Receiver<Msg>) -> PeerHandler {
         let (rx_write, rx_read) = mpsc::channel(512);
         let (tx_write, tx_read) = mpsc::channel(512);
 
         let p = Arc::new(peer);
-        let p_copy = p.clone();
+        let peer_run = p.clone();
 
         tokio::spawn(async move {
-            p_copy.run(tx_read, rx_write).await;
+            peer_run.run(tx_read, rx_write).await;
+        });
+
+        let peer_broadcast = p.clone();
+        tokio::spawn(async move {
+            loop {
+                match broadcast_receiver.recv().await {
+                    Ok(msg) => match peer_broadcast.send_and_wrap_msg(msg).await {
+                        Ok(()) => debug!("broadcast completed"),
+                        Err(e) => {
+                            error!("failed to broadcast {}", e);
+                            todo!();
+                        }
+                    },
+                    Err(e) => {
+                        error!("failed to broadcast {}", e);
+                        todo!();
+                    }
+                };
+            }
         });
 
         let p = PeerHandler {
@@ -63,7 +82,11 @@ impl PeerHandler {
     }
 }
 
-async fn accept_connection(state_ref: Arc<Mutex<ServerState>>, stream: TcpStream) {
+async fn accept_connection(
+    state_ref: Arc<Mutex<ServerState>>,
+    stream: TcpStream,
+    mut broadcast_receiver: broadcast::Receiver<Msg>,
+) {
     let mut state = state_ref.lock().await;
     // Close incomming connection if server has reached its maximum connection counter
     if state.peers.keys().len() == state.max_parallel_connections {
@@ -85,7 +108,7 @@ async fn accept_connection(state_ref: Arc<Mutex<ServerState>>, stream: TcpStream
                     "p2p/server/accept: completed challenge; result={:?} addr={}",
                     resp, addr
                 );
-                let handler = PeerHandler::new(peer);
+                let handler = PeerHandler::new(peer, broadcast_receiver);
                 // store peer state
                 state.peers.insert(addr, handler);
             }
@@ -99,7 +122,7 @@ impl Server {
         let listener = TcpListener::bind(addr).await.unwrap();
 
         let (tx_sender, tx_receiver) = mpsc::channel(512);
-        let (broadcast_sender, broadcast_receiver) = mpsc::channel(512);
+        let (broadcast_sender, broadcast_receiver) = broadcast::channel(512);
 
         Server {
             state: Arc::new(Mutex::new(ServerState::new())),
@@ -126,7 +149,7 @@ impl Server {
         // store connection on state
         let r = self.state.clone();
         let mut state = r.lock().await;
-        let handler = PeerHandler::new(peer);
+        let handler = PeerHandler::new(peer, self.broadcast_sender.subscribe());
         // store peer state
         state.peers.insert(addr, handler);
 
@@ -148,12 +171,12 @@ impl Server {
                     };
 
                     info!("p2p/server/accept: incoming connection from {}", addr);
-                    accept_connection(self.state.clone(), stream).await;
+                    accept_connection(
+                        self.state.clone(),
+                        stream,
+                        self.broadcast_sender.subscribe(),
+                    ).await;
                 }
-
-                // tx = self.broadcast_receiver.recv() => {
-
-                // }
             }
         }
     }
@@ -166,5 +189,10 @@ impl Server {
         }
     }
 
-    pub async fn broadcast(&self, msg: Msg) {}
+    pub async fn broadcast(
+        &self,
+        msg: Msg,
+    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Msg>> {
+        self.broadcast_sender.send(msg)
+    }
 }

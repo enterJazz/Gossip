@@ -1,4 +1,5 @@
 mod communication;
+use crate::communication::p2p::message;
 use crate::communication::p2p::server::Server;
 use chrono::Local;
 use clap::Parser;
@@ -67,16 +68,16 @@ async fn main() {
                 panic!("failed to connect {}", e);
             }
         };
-        _ = match s3.connect("127.0.0.1:1334".parse().unwrap()).await {
-            Ok(()) => (),
-            Err(e) => {
-                panic!("failed to connect {}", e);
-            }
-        };
     })
     .await;
 
     s1.print_conns().await;
+    let msg = message::envelope::Msg::Data(message::Data {
+        payload: "hello there".as_bytes().to_vec(),
+    });
+    s1.broadcast(msg).await;
+
+    loop {}
     // s2.print_conns().await;
     // s3.print_conns().await;
 }

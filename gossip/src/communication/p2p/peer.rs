@@ -29,6 +29,8 @@ pub enum PeerError {
 pub enum RecvError {
     #[error("protoc decode error")]
     Decode(#[from] prost::DecodeError),
+    #[error("received empty envelope")]
+    EmptyEnvelope,
     #[error("stream read error")]
     Read(#[from] io::Error),
     #[error("read invalid length {0}")]
@@ -84,7 +86,7 @@ impl Peer {
     pub fn new(stream: TcpStream) -> Self {
         let addr = stream.peer_addr().unwrap();
 
-        let (mut rx, mut tx) = TcpStream::into_split(stream);
+        let (rx, tx) = TcpStream::into_split(stream);
 
         return Peer {
             rx: Arc::new(Mutex::new(rx)),
@@ -158,9 +160,25 @@ impl Peer {
         Ok(())
     }
 
-    pub async fn send_msg(&self, msg: Envelope) -> Result<(), SendError> {
+    pub async fn send_and_wrap_msg(&self, msg: envelope::Msg) -> Result<(), SendError> {
+        let envelope = Envelope { msg: Some(msg) };
+        debug!("sending to {}", self.addr);
+        self.send_msg(envelope).await
+    }
+
+    pub async fn read_and_unwrap_msg(&self) -> Result<envelope::Msg, RecvError> {
+        match self.read_msg().await {
+            Ok(envelope) => match envelope.msg {
+                Some(msg) => Ok(msg),
+                None => Err(RecvError::EmptyEnvelope),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn send_msg(&self, envelope: Envelope) -> Result<(), SendError> {
         let mut tx = self.tx.lock().await;
-        let buf = msg.encode_to_vec();
+        let buf = envelope.encode_to_vec();
         match tx.write(&buf).await {
             Ok(0) => Err(SendError::InvalidLength(0)),
             Ok(n) => Ok(()),
@@ -201,10 +219,11 @@ impl Peer {
     ) -> bool {
         loop {
             tokio::select! {
-                rx_envelope = self.read_msg() => {
-                    match rx_envelope {
+                rx_msg = self.read_and_unwrap_msg() => {
+                    debug!("got message");
+                    match rx_msg {
                         // TODO: remove optional wrapping aroung msg in envelope
-                        Ok(envelope) => rx.send(envelope.msg.unwrap()).await.unwrap(),
+                        Ok(msg) => rx.send(msg).await.unwrap(),
                         Err(err) => {
                             warn!("failed to receive msg {}", err);
                             continue;
