@@ -2,7 +2,7 @@ use crate::communication::p2p::message::{envelope, Envelope, VerificationRequest
 use bytes::BytesMut;
 use log::{debug, error, info, log_enabled, warn, Level};
 use prost::Message;
-use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr};
 use std::str;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
@@ -10,6 +10,8 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::net::{tcp, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+
+use super::message;
 
 /// Shorthand for the receive half of the message channel.
 type RxStreamHalf = Arc<Mutex<tcp::OwnedReadHalf>>;
@@ -78,6 +80,10 @@ pub struct Peer {
     pub status: PeerConnectionStatus,
     addr: SocketAddr,
 
+    // hash of public key and ip address of a peer
+    pub identity: [u8; 256],
+    pub pub_key: [u8; 256],
+
     // buffer for reading messages.
     read_buffer: BytesMut,
 }
@@ -95,6 +101,8 @@ impl Peer {
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
             read_buffer: BytesMut::with_capacity(8 * 1024),
+            identity: [0; 256],
+            pub_key: [0; 256],
         };
     }
 
@@ -138,19 +146,25 @@ impl Peer {
     // initiate the connection process by publishing challenge to the other party defined by the underlying
     // TCP Stream
     pub async fn challenge(&mut self) -> PeerResult<()> {
-        let challenge_req = Envelope {
-            msg: Some(envelope::Msg::VerificationRequest(VerificationRequest {
-                challenge: "test".as_bytes().to_vec(),
-                pub_key: "bla".as_bytes().to_vec(),
-            })),
-        };
+        let challenge_req = envelope::Msg::VerificationRequest(VerificationRequest {
+            challenge: "test".as_bytes().to_vec(),
+            pub_key: "bla".as_bytes().to_vec(),
+        });
 
-        if let Err(err) = self.send_msg(challenge_req).await {
+        if let Err(err) = self.send_and_wrap_msg(challenge_req).await {
             error!("P2P peer: failed to send challenge {}", err.to_string());
             return Err(PeerError::Challenge());
         }
 
         info!("P2P peer: challenge send");
+
+        match self.read_and_unwrap_msg().await {
+            Ok(msg) => match msg {
+                message::envelope::Msg::VerificationResponse(resp) => Ok(()),
+                _ => Err(PeerError::Challenge()),
+            },
+            _ => Err(PeerError::Challenge()),
+        };
 
         // TODO: handle responses
         // let rx = self.rx.clone();
@@ -207,6 +221,29 @@ impl Peer {
         return self.addr;
     }
 
+    pub fn get_peer_addr(&self) -> message::Addr {
+        let addr = self.get_addr();
+
+        let mut msg_addr = message::Addr {
+            ip: None,
+            port: addr.port() as u32,
+        };
+
+        match addr.ip() {
+            IpAddr::V4(ip) => msg_addr.ip = Some(message::addr::Ip::V4(ip.into())),
+            IpAddr::V6(ip) => msg_addr.ip = Some(message::addr::Ip::V6(ip.octets().to_vec())),
+        }
+
+        msg_addr
+    }
+
+    pub fn get_peer_description(&self) -> message::Peer {
+        message::Peer {
+            identity: self.identity.to_vec(),
+            address: Some(self.get_peer_addr()),
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.status == PeerConnectionStatus::Connected
             || self.status == PeerConnectionStatus::Connecting
@@ -220,7 +257,7 @@ impl Peer {
         loop {
             tokio::select! {
                 rx_msg = self.read_and_unwrap_msg() => {
-                    debug!("got message");
+                    debug!("got message {:?}", rx_msg);
                     match rx_msg {
                         // TODO: remove optional wrapping aroung msg in envelope
                         Ok(msg) => rx.send(msg).await.unwrap(),
@@ -238,10 +275,7 @@ impl Peer {
                     }
 
                     debug!("sending data");
-                    let env = Envelope{
-                        msg: tx_msg,
-                    };
-                    match self.send_msg(env).await {
+                    match self.send_and_wrap_msg(tx_msg.unwrap()).await {
                         Ok(()) => debug!("msg send"),
                         Err(err) => error!("failed to send {}", err)
                     }

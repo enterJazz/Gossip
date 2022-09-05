@@ -2,6 +2,14 @@ syntax = "proto3";
 
 package gossip.communicator.p2p.message;
 
+message Addr {
+  oneof ip {
+    fixed32 v4 = 1;
+    bytes v6 = 2;
+  }
+  uint32 port = 3;
+}
+
 enum MsgTypes {
   VERIFICATION_REQUEST = 0;
   VERIFICATION_RESPONSE = 1;
@@ -18,14 +26,32 @@ message VerificationResponse {
   bytes challenge = 1;
   bytes pub_key = 2;
   bytes nonce = 3;
+  bytes signature = 4;
 }
 
-message Data { bytes payload = 1; }
+message Peer {
+  bytes identity = 1;
+  Addr address = 2;
+}
+
+message Rumor {
+  uint32 ttl = 1;
+  repeated Peer peers = 2;
+}
+
+message PullRequest { uint32 ttl = 1; }
+message Data {
+  uint32 ttl = 1;
+  bytes payload = 2;
+}
 
 message Envelope {
+
   oneof msg {
-    VerificationRequest verificationRequest = 1;
-    VerificationResponse verificationResponse = 2;
-    Data data = 3;
+    VerificationRequest verificationRequest = 2;
+    VerificationResponse verificationResponse = 3;
+    Data data = 4;
+    Rumor rumor = 5;
+    PullRequest pull = 6;
   }
 }

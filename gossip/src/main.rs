@@ -5,6 +5,7 @@ use chrono::Local;
 use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
+use log::{error, info};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,11 +74,13 @@ async fn main() {
 
     s1.print_conns().await;
     let msg = message::envelope::Msg::Data(message::Data {
+        ttl: 1,
         payload: "hello there".as_bytes().to_vec(),
     });
-    s1.broadcast(msg).await;
-
-    loop {}
+    match s1.broadcast(msg).await {
+        Ok(size) => info!("send okay {}", size),
+        Err(e) => error!("err {}", e),
+    };
     // s2.print_conns().await;
     // s3.print_conns().await;
 }

@@ -1,13 +1,28 @@
 use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
 use log::{debug, error, info, warn};
 use prost::Message;
+use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
+use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use super::message::envelope::Msg;
+use super::message;
+
+#[derive(Error, Debug)]
+pub enum ServerError {
+    #[error("peer not found {0}")]
+    PeerNotFound(SocketAddr),
+    #[error("failed to sample random peer")]
+    PeerSamplingFailed,
+    #[error("push failed")]
+    PeerPushError,
+    #[error("pull failed")]
+    PeerPullError,
+}
 
 struct ServerState {
     max_parallel_connections: usize,
@@ -18,11 +33,13 @@ pub struct Server {
     listener: TcpListener,
     state: Arc<Mutex<ServerState>>,
 
-    tx_sender: mpsc::Sender<(Msg, SocketAddr)>,
-    tx_receiver: mpsc::Receiver<(Msg, SocketAddr)>,
+    tx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    tx_receiver: mpsc::Receiver<(message::envelope::Msg, SocketAddr)>,
+    rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    rx_receiver: Arc<Mutex<mpsc::Receiver<(message::envelope::Msg, SocketAddr)>>>,
 
-    broadcast_sender: broadcast::Sender<Msg>,
-    broadcast_receiver: broadcast::Receiver<Msg>,
+    broadcast_sender: broadcast::Sender<message::envelope::Msg>,
+    broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
 }
 
 impl ServerState {
@@ -35,15 +52,23 @@ impl ServerState {
     }
 }
 
+type PeerReceiver = mpsc::Receiver<message::envelope::Msg>;
+type PeerSender = mpsc::Sender<message::envelope::Msg>;
+type PeerBroadcastReceiver = broadcast::Receiver<message::envelope::Msg>;
+type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
+
 struct PeerHandler {
-    msg_rx: mpsc::Receiver<Msg>,
-    msg_tx: mpsc::Sender<Msg>,
+    msg_tx: PeerSender,
     peer: Arc<Peer>,
 }
 
 impl PeerHandler {
-    fn new(peer: Peer, mut broadcast_receiver: broadcast::Receiver<Msg>) -> PeerHandler {
-        let (rx_write, rx_read) = mpsc::channel(512);
+    fn new(
+        peer: Peer,
+        mut msg_rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+        mut broadcast_receiver: PeerBroadcastReceiver,
+    ) -> PeerHandler {
+        let (rx_write, mut rx_read) = mpsc::channel(512);
         let (tx_write, tx_read) = mpsc::channel(512);
 
         let p = Arc::new(peer);
@@ -53,39 +78,68 @@ impl PeerHandler {
             peer_run.run(tx_read, rx_write).await;
         });
 
-        let peer_broadcast = p.clone();
+        let tx_clone = tx_write.clone();
+        let peer_addr = p.get_addr();
         tokio::spawn(async move {
             loop {
-                match broadcast_receiver.recv().await {
-                    Ok(msg) => match peer_broadcast.send_and_wrap_msg(msg).await {
-                        Ok(()) => debug!("broadcast completed"),
-                        Err(e) => {
-                            error!("failed to broadcast {}", e);
-                            todo!();
+                tokio::select! {
+
+                    // message comming in from peer
+                    // receive message from peer and expand it by peer information
+                    // so that in can easily be processes in the server level
+                    peer_rx_msg = rx_read.recv() => {
+                        match peer_rx_msg {
+                            Some(msg) => match msg_rx_sender.send((msg, peer_addr)).await {
+                                Ok(()) => debug!("recv completed"),
+                                Err(e) => {
+                                    error!("failed to receive message {}", e);
+                                    todo!();
+                                }
+                            }
+                            None => warn!("got empty message from peer channel")
                         }
-                    },
-                    Err(e) => {
-                        error!("failed to broadcast {}", e);
-                        todo!();
                     }
-                };
+
+                    // broadcast message to peer
+                    broadcast_msg = broadcast_receiver.recv() => {
+                        info!("got broadcast message");
+                        match broadcast_msg {
+                            Ok(msg) => match tx_clone.send(msg).await {
+                                Ok(()) => debug!("message send"),
+                                Err(e) => {
+                                    error!("failed to broadcast {}", e);
+                                },
+                            },
+                            Err(e) => {
+                                error!("failed to broadcast {}", e);
+                                todo!();
+                            }
+                        }
+                    }
+
+                }
             }
         });
 
-        let p = PeerHandler {
-            msg_rx: rx_read,
+        PeerHandler {
             msg_tx: tx_write,
             peer: p,
-        };
+        }
+    }
 
-        return p;
+    async fn send_msg(
+        &self,
+        msg: message::envelope::Msg,
+    ) -> Result<(), SendError<message::envelope::Msg>> {
+        self.msg_tx.send(msg).await
     }
 }
 
 async fn accept_connection(
     state_ref: Arc<Mutex<ServerState>>,
     stream: TcpStream,
-    mut broadcast_receiver: broadcast::Receiver<Msg>,
+    msg_rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
 ) {
     let mut state = state_ref.lock().await;
     // Close incomming connection if server has reached its maximum connection counter
@@ -108,7 +162,7 @@ async fn accept_connection(
                     "p2p/server/accept: completed challenge; result={:?} addr={}",
                     resp, addr
                 );
-                let handler = PeerHandler::new(peer, broadcast_receiver);
+                let handler = PeerHandler::new(peer, msg_rx_sender, broadcast_receiver);
                 // store peer state
                 state.peers.insert(addr, handler);
             }
@@ -121,6 +175,7 @@ impl Server {
     pub async fn new(addr: SocketAddr) -> Self {
         let listener = TcpListener::bind(addr).await.unwrap();
 
+        let (rx_sender, rx_receiver) = mpsc::channel(512);
         let (tx_sender, tx_receiver) = mpsc::channel(512);
         let (broadcast_sender, broadcast_receiver) = broadcast::channel(512);
 
@@ -129,8 +184,14 @@ impl Server {
             listener,
             broadcast_receiver,
             broadcast_sender,
+
+            // channels for sending messages to a specific peer
             tx_receiver,
             tx_sender,
+
+            // channel for receiving messages from peers
+            rx_sender,
+            rx_receiver: Arc::new(Mutex::new(rx_receiver)),
         }
     }
 
@@ -149,7 +210,11 @@ impl Server {
         // store connection on state
         let r = self.state.clone();
         let mut state = r.lock().await;
-        let handler = PeerHandler::new(peer, self.broadcast_sender.subscribe());
+        let handler = PeerHandler::new(
+            peer,
+            self.rx_sender.clone(),
+            self.broadcast_sender.subscribe(),
+        );
         // store peer state
         state.peers.insert(addr, handler);
 
@@ -159,8 +224,13 @@ impl Server {
     }
 
     pub async fn run(&self) -> io::Result<()> {
+        // lock rx_receiver channel
+        // this also ensures only one run can be executed at a time
+        let mut rx_receiver = self.rx_receiver.lock().await;
+
         loop {
             tokio::select! {
+                // accept new incomming messages
                 res = self.listener.accept() => {
                     let (stream, addr) = match res {
                         Ok(res) => res,
@@ -174,25 +244,126 @@ impl Server {
                     accept_connection(
                         self.state.clone(),
                         stream,
+                        self.rx_sender.clone(),
                         self.broadcast_sender.subscribe(),
                     ).await;
+                }
+
+                // handle messages from peers after a peer is active
+                in_msg = rx_receiver.recv() => {
+                    let (msg, peer_addr) = match in_msg {
+                        Some(data) => data,
+                        None => {
+                            error!("p2p/server/recv: received empty message");
+                            continue;
+                        }
+                    };
+
+                    todo!("peer messages not handled yet {:?} {}", msg, peer_addr)
                 }
             }
         }
     }
 
+    pub async fn broadcast(
+        &self,
+        msg: message::envelope::Msg,
+    ) -> Result<usize, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
+        self.broadcast_sender.send(msg)
+    }
+
+    async fn more_peers_required(&self) -> bool {
+        let state = self.state.lock().await;
+
+        // TODO: @wlad adjust this computation
+        return state.peers.len() < state.max_parallel_connections;
+    }
+
     pub async fn print_conns(&self) {
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
 
         for (addr, peer) in &state.peers {
             println!("connected to {}", addr)
         }
     }
 
-    pub async fn broadcast(
-        &self,
-        msg: Msg,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<Msg>> {
-        self.broadcast_sender.send(msg)
+    async fn get_peer_list(&self, exclude_addr: Option<SocketAddr>) -> Vec<message::Peer> {
+        let state = self.state.lock().await;
+
+        // IDEA: preallocate capacity since its always peers.length() - 1
+        let mut peers: Vec<message::Peer> = Vec::new();
+
+        for (addr, peer_handler) in state.peers.iter() {
+            // skip over exclude_addr if provided
+            if let Some(exclude) = exclude_addr {
+                if exclude == *addr {
+                    continue;
+                }
+            }
+            peers.push(peer_handler.peer.get_peer_description())
+        }
+
+        peers
+    }
+
+    // select a random peer using
+    // cryptographically random number generator
+    async fn sample_random_peer(&self) -> Result<SocketAddr, ServerError> {
+        let state = self.state.lock().await;
+
+        if let Some(key) = state.peers.keys().choose(&mut rand::thread_rng()) {
+            Ok(key.clone())
+        } else {
+            Err(ServerError::PeerSamplingFailed)
+        }
+    }
+
+    async fn push(&self) -> Result<(), ServerError> {
+        let random_peer_addr = match self.sample_random_peer().await {
+            Ok(addr) => addr,
+            Err(err) => return Err(err),
+        };
+
+        let state = self.state.lock().await;
+        let peer_handle = match state.peers.get(&random_peer_addr) {
+            Some(peer) => peer,
+            None => return Err(ServerError::PeerNotFound(random_peer_addr)),
+        };
+
+        let peers = self.get_peer_list(Some(random_peer_addr)).await;
+        // construct peer rumor packet
+        let rumor = message::envelope::Msg::Rumor(message::Rumor {
+            // FIXME: use correct ttl
+            ttl: 1,
+            peers: peers,
+        });
+
+        match peer_handle.msg_tx.send(rumor).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(ServerError::PeerPushError),
+        }
+    }
+
+    async fn pull(&self) -> Result<(), ServerError> {
+        let random_peer_addr = match self.sample_random_peer().await {
+            Ok(addr) => addr,
+            Err(err) => return Err(err),
+        };
+
+        let state = self.state.lock().await;
+        let peer_handle = match state.peers.get(&random_peer_addr) {
+            Some(peer) => peer,
+            None => return Err(ServerError::PeerNotFound(random_peer_addr)),
+        };
+
+        // request peer for its knowledge base
+        // response will be handled by normal handler routine
+        // FIXME: use correct ttl
+        let pull_req = message::envelope::Msg::Pull(message::PullRequest { ttl: 1 });
+
+        match peer_handle.msg_tx.send(pull_req).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(ServerError::PeerPullError),
+        }
     }
 }
