@@ -5,5 +5,5 @@ mod communication;
 mod proof_of_work;
 mod publisher;
 mod validator;
-mod config;
+pub mod config;
 mod common;
