@@ -34,6 +34,8 @@ pub enum ServerError {
     PeerPullError,
     #[error("server: rx channel err {0}")]
     RxChannelError(#[from] SendError<ServerPeerMessage>),
+    #[error("server: rx data channel err")]
+    RxDataChannelError,
 }
 
 struct ServerState {
@@ -207,7 +209,7 @@ async fn remove_connection(
 
 pub async fn run_p2p_server(
     addr_str: &str,
-    rx: mpsc::Sender<ServerPeerMessage>,
+    rx: mpsc::Sender<(message::Data, SocketAddr)>,
     // pub_key: [u8; 256],
 ) -> Result<Arc<Server>, AddrParseError> {
     let addr: SocketAddr = match addr_str.parse() {
@@ -261,37 +263,9 @@ impl Server {
         }
     }
 
-    // connect to remote peer‚
-    pub async fn connect(&self, addr: SocketAddr) -> PeerResult<()> {
-        let mut peer = match Peer::new_from_addr(addr).await {
-            Err(e) => return Err(e),
-            Ok(peer) => peer,
-        };
-
-        match peer.connect().await {
-            Err(e) => return Err(e),
-            Ok(()) => info!("p2p/server/connect: connected to {}", addr),
-        };
-
-        // store connection on state
-        let r = self.state.clone();
-        let mut state = r.lock().await;
-        let handler = PeerHandler::new(
-            peer,
-            self.rx_sender.clone(),
-            self.broadcast_sender.subscribe(),
-        );
-        // store peer state
-        state.peers.insert(addr, handler);
-
-        info!("p2p/server/connect: peer {} added to active pool", addr);
-
-        Ok({})
-    }
-
     pub async fn run(
         &self,
-        rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+        rx: mpsc::Sender<(message::Data, SocketAddr)>,
     ) -> Result<(), ServerError> {
         // lock rx_receiver channel
         // this also ensures only one run can be executed at a time
@@ -329,10 +303,19 @@ impl Server {
                         }
                     };
 
-                    match rx.send((msg, peer_addr)).await {
-                        Ok(_) => (),
-                        Err(err) => return Err(ServerError::RxChannelError(err)),
-                    };
+                    match msg {
+                        message::envelope::Msg::Data(data) => {
+                            match rx.send((data, peer_addr)).await {
+                                Ok(_) => (),
+                                Err(err) => return Err(ServerError::RxDataChannelError),
+                            };
+                        }
+                        _ => {
+                            // TODO: handle incomming pull responses here
+                            debug!("got internal message {:?}", msg)
+                        }
+                    }
+
                 }
 
                  // handle peer removals in case of errors
@@ -351,31 +334,41 @@ impl Server {
         }
     }
 
-    pub async fn broadcast(
-        &self,
-        msg: message::envelope::Msg,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
-        info!("broadcast sending...");
-        self.broadcast_sender.send(msg)
+    // connect to remote peer‚
+    pub async fn connect(&self, addr: SocketAddr) -> PeerResult<()> {
+        let mut peer = match Peer::new_from_addr(addr).await {
+            Err(e) => return Err(e),
+            Ok(peer) => peer,
+        };
+
+        match peer.connect().await {
+            Err(e) => return Err(e),
+            Ok(()) => info!("p2p/server/connect: connected to {}", addr),
+        };
+
+        // store connection on state
+        let r = self.state.clone();
+        let mut state = r.lock().await;
+        let handler = PeerHandler::new(
+            peer,
+            self.rx_sender.clone(),
+            self.broadcast_sender.subscribe(),
+        );
+        // store peer state
+        state.peers.insert(addr, handler);
+
+        info!("p2p/server/connect: peer {} added to active pool", addr);
+
+        Ok({})
     }
 
-    async fn get_peer_list(&self, exclude_addr: Option<SocketAddr>) -> Vec<message::Peer> {
-        let state = self.state.lock().await;
-
-        // IDEA: preallocate capacity since its always peers.length() - 1
-        let mut peers: Vec<message::Peer> = Vec::new();
-
-        for (addr, peer_handler) in state.peers.iter() {
-            // skip over exclude_addr if provided
-            if let Some(exclude) = exclude_addr {
-                if exclude == *addr {
-                    continue;
-                }
-            }
-            peers.push(peer_handler.peer.get_peer_description())
-        }
-
-        peers
+    pub async fn broadcast(
+        &self,
+        data: message::Data,
+    ) -> Result<usize, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
+        info!("broadcast sending...");
+        self.broadcast_sender
+            .send(message::envelope::Msg::Data(data))
     }
 
     // select a random peer using
@@ -437,6 +430,25 @@ impl Server {
             Ok(_) => Ok(()),
             Err(err) => Err(ServerError::PeerPullError),
         }
+    }
+
+    async fn get_peer_list(&self, exclude_addr: Option<SocketAddr>) -> Vec<message::Peer> {
+        let state = self.state.lock().await;
+
+        // IDEA: preallocate capacity since its always peers.length() - 1
+        let mut peers: Vec<message::Peer> = Vec::new();
+
+        for (addr, peer_handler) in state.peers.iter() {
+            // skip over exclude_addr if provided
+            if let Some(exclude) = exclude_addr {
+                if exclude == *addr {
+                    continue;
+                }
+            }
+            peers.push(peer_handler.peer.get_peer_description())
+        }
+
+        peers
     }
 
     pub async fn print_conns(&self) {

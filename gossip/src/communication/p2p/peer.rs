@@ -287,11 +287,6 @@ impl Peer {
         }
     }
 
-    pub fn is_active(&self) -> bool {
-        self.status == PeerConnectionStatus::Connected
-            || self.status == PeerConnectionStatus::Connecting
-    }
-
     pub async fn run(
         &self,
         mut tx: mpsc::Receiver<envelope::Msg>,

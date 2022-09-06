@@ -44,10 +44,10 @@ async fn p2p_broadcast_test() {
 
     let payload = "hello there";
 
-    let msg = message::envelope::Msg::Data(message::Data {
+    let msg = message::Data {
         ttl: 1,
         payload: payload.as_bytes().to_vec(),
-    });
+    };
     match s1.broadcast(msg).await {
         Ok(size) => info!("send okay {}", size),
         Err(e) => error!("err {}", e),
@@ -55,15 +55,9 @@ async fn p2p_broadcast_test() {
 
     loop {
         match tx_2.recv().await {
-            Some((msg, addr)) => {
+            Some((data, addr)) => {
                 println!("s2: got message from {}", addr);
-                match msg {
-                    message::envelope::Msg::Data(data) => {
-                        assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-                        break;
-                    }
-                    _ => (),
-                }
+                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
                 break;
             }
             None => (),
@@ -72,16 +66,10 @@ async fn p2p_broadcast_test() {
 
     loop {
         match tx_3.recv().await {
-            Some((msg, addr)) => {
+            Some((data, addr)) => {
                 println!("s3: got message from {}", addr);
-                match msg {
-                    message::envelope::Msg::Data(data) => {
-                        assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-
-                        break;
-                    }
-                    _ => panic!("got unexpected message {:?}", msg),
-                }
+                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
+                break;
             }
             None => (),
         }
