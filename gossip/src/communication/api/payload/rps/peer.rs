@@ -1,11 +1,11 @@
-use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use crate::communication::api::parse;
+use crate::communication::api::parse::{get_size, get_u16, get_u8, skip, Error};
 use bytes::Bytes;
 use log::{debug, warn};
-use num_traits::FromPrimitive;
 use num_derive::FromPrimitive;
-use crate::communication::api::parse;
-use crate::communication::api::parse::{Error, get_size, get_u16, get_u8, skip};
+use num_traits::FromPrimitive;
+use std::io::Cursor;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Debug, Clone, PartialEq, FromPrimitive)]
 pub enum Module {
@@ -17,9 +17,9 @@ pub enum Module {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Peer {
-    pub(crate) address: std::net::SocketAddr,
-    pub(crate) port_map_records: Vec<PortMapRecord>,
-    pub(crate) host_key: Bytes,
+    pub address: std::net::SocketAddr,
+    pub port_map_records: Vec<PortMapRecord>,
+    pub host_key: Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,18 +41,17 @@ impl Peer {
         // parse port maps
         let mut port_map_records: Vec<PortMapRecord> = vec![];
         for _ in 0..no_port_map_records {
-
             let module_code = get_u16(src)?;
-            let module: Module =
-                FromPrimitive::from_u16(module_code).ok_or(Error::Unknown { field_name: "module code".to_string(), value: module_code.to_string() })?;
+            let module: Module = FromPrimitive::from_u16(module_code).ok_or(Error::Unknown {
+                field_name: "module code".to_string(),
+                value: module_code.to_string(),
+            })?;
             let module_port = get_u16(src)?;
 
-            port_map_records.push(
-                PortMapRecord {
-                    module,
-                    port: module_port,
-                }
-            )
+            port_map_records.push(PortMapRecord {
+                module,
+                port: module_port,
+            })
         }
 
         // parse IP addr
@@ -78,22 +77,16 @@ impl Peer {
         // no_port_maps * 4
         // IpAddr: 4 OR 16
         let host_key_size = match &ip_addr_version {
-            IpAddr::V4(_) => {
-                (size as usize) - (&port_map_records.len() * 4 + 10)
-            }
-            IpAddr::V6(_) => {
-                (size as usize) - (&port_map_records.len() * 4 + 22)
-            }
+            IpAddr::V4(_) => (size as usize) - (&port_map_records.len() * 4 + 10),
+            IpAddr::V6(_) => (size as usize) - (&port_map_records.len() * 4 + 22),
         };
 
         let host_key = get_size(src, host_key_size)?;
 
-        Ok(
-            Self {
-                address,
-                port_map_records,
-                host_key,
-            }
-        )
+        Ok(Self {
+            address,
+            port_map_records,
+            host_key,
+        })
     }
 }

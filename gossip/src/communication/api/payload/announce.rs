@@ -4,9 +4,9 @@ use std::io::Cursor;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Announce {
-    ttl: u8,
-    data_type: u16,
-    data: Bytes,
+    pub ttl: u8,
+    pub data_type: u16,
+    pub data: Bytes,
 }
 
 impl Announce {

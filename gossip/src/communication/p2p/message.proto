@@ -53,7 +53,8 @@ message Rumor {
 message PullRequest { uint32 ttl = 1; }
 message Data {
   uint32 ttl = 1;
-  bytes payload = 2;
+  uint32 data_type = 2;
+  bytes payload = 3;
 }
 
 message Envelope {

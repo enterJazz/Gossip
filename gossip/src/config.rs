@@ -1,5 +1,5 @@
 use ini::Ini;
-use std::{collections::HashMap, io, net::SocketAddr, path::PathBuf};
+use std::{collections::HashMap, fs, io, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 use url::Url;
 
@@ -27,6 +27,8 @@ pub enum ConfigError {
 /// Configuration loaded from ini file
 pub struct Config {
     host_key_path: PathBuf,
+    key_pem: pem::Pem,
+
     cache_size: usize,
     degree: usize,
     bootstrapper: Url,
@@ -53,6 +55,24 @@ impl Config {
                 field_name: HOST_KEY_PATH_FIELD.to_string(),
                 err_msg: e.to_string(),
             })?;
+
+        // TODO: check what file ending host_key_path should use
+        if host_key_path.is_file() {
+            let file = match fs::read_to_string(host_key_path) {
+                Ok(f) => f,
+                Err(err) => {
+                    return Err(ConfigError::ParsingError {
+                        field_name: "host_key_path".to_string(),
+                        err_msg: err.to_string(),
+                    })
+                }
+            };
+        } else {
+            return Err(ConfigError::ParsingError {
+                field_name: "host_key_path".to_string(),
+                err_msg: "host_key_path is not a file".to_string(),
+            });
+        }
 
         let gossip_section =
             conf.section(Some(GOSSIP_SECTION_NAME))
