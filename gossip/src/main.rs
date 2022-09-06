@@ -1,20 +1,16 @@
 mod communication;
-use crate::communication::p2p::message;
-use crate::communication::p2p::server::run_p2p_server;
 use chrono::Local;
 use clap::Parser;
 use env_logger::Builder;
+use gossip::config;
 use log::LevelFilter;
-use log::{error, info};
 use std::io::Write;
 use std::path::PathBuf;
-use std::str;
-use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 struct Args {
     /// Sets a custom config file
-    #[clap(short, long, value_parser, value_name = "FILE")]
+    #[clap(short, long, value_parser, value_name = "CONFIG_FILE")]
     config: Option<PathBuf>,
 }
 
@@ -35,4 +31,10 @@ async fn main() {
 
     // TODO: parse config from args
     let args = Args::parse();
+    let config: config::Config;
+    if let Some(config_path) = args.config {
+        config = config::Config::load_config(config_path).unwrap();
+    } else {
+        panic!("no config file provided")
+    }
 }

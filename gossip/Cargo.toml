@@ -17,7 +17,9 @@ log = "0.4.17"
 chrono = "0.4.19"
 env_logger = "0.9.0"
 # for config file parsing
-ini = "1.3.0"
+rust-ini = "0.18"
+# for URLs in config file (e.g. bootstrapper)
+url = "2.2.2"
 # for message encoding
 prost = "0.10"
 bytes = "1.1.0"
@@ -26,11 +28,14 @@ num-derive = "0.3.3"
 num-traits = "0.2.15"
 # for random nums
 rand = "0.8.5"
+# for hashing challenge
+blake3 = "1.3.1"
 # for async traits
 async-trait = "0.1.56"
 
 [dev-dependencies]
-pretty_assertions = "1.2.1"
+pretty_assertions = "1.3.0"
+
 
 [build-dependencies]
 prost-build = "0.10.4"
