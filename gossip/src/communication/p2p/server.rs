@@ -1,17 +1,24 @@
 use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
 use log::{debug, error, info, warn};
-use prost::Message;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::net::AddrParseError;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{io, net::SocketAddr};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use super::message::{self, addr};
+use super::message;
+
+// message type used by messages originating from server
+type ServerPeerMessage = (message::envelope::Msg, SocketAddr);
+
+type PeerReceiver = mpsc::Receiver<message::envelope::Msg>;
+type PeerSender = mpsc::Sender<message::envelope::Msg>;
+type PeerBroadcastReceiver = broadcast::Receiver<message::envelope::Msg>;
+type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -23,6 +30,8 @@ pub enum ServerError {
     PeerPushError,
     #[error("pull failed")]
     PeerPullError,
+    #[error("server: rx channel err {0}")]
+    RxChannelError(#[from] SendError<ServerPeerMessage>),
 }
 
 struct ServerState {
@@ -34,10 +43,10 @@ pub struct Server {
     listener: TcpListener,
     state: Arc<Mutex<ServerState>>,
 
-    tx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
-    tx_receiver: mpsc::Receiver<(message::envelope::Msg, SocketAddr)>,
-    rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
-    rx_receiver: Arc<Mutex<mpsc::Receiver<(message::envelope::Msg, SocketAddr)>>>,
+    tx_sender: mpsc::Sender<ServerPeerMessage>,
+    tx_receiver: mpsc::Receiver<ServerPeerMessage>,
+    rx_sender: mpsc::Sender<ServerPeerMessage>,
+    rx_receiver: Arc<Mutex<mpsc::Receiver<ServerPeerMessage>>>,
 
     broadcast_sender: broadcast::Sender<message::envelope::Msg>,
     broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
@@ -53,11 +62,6 @@ impl ServerState {
     }
 }
 
-type PeerReceiver = mpsc::Receiver<message::envelope::Msg>;
-type PeerSender = mpsc::Sender<message::envelope::Msg>;
-type PeerBroadcastReceiver = broadcast::Receiver<message::envelope::Msg>;
-type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
-
 struct PeerHandler {
     msg_tx: PeerSender,
     peer: Arc<Peer>,
@@ -66,34 +70,39 @@ struct PeerHandler {
 impl PeerHandler {
     fn new(
         peer: Peer,
-        msg_rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+        msg_rx_sender: mpsc::Sender<ServerPeerMessage>,
         mut broadcast_receiver: PeerBroadcastReceiver,
     ) -> PeerHandler {
         let (rx_write, mut rx_read) = mpsc::channel(512);
         let (tx_write, tx_read) = mpsc::channel(512);
 
+        let (close_sender, mut close_receiver) = mpsc::channel::<Option<PeerError>>(1);
+
         let p = Arc::new(peer);
         let peer_run = p.clone();
 
+        // run peer recv and send methods
+        // on transmission error write into close channel
         tokio::spawn(async move {
-            peer_run.run(tx_read, rx_write).await;
+            match peer_run.run(tx_read, rx_write).await {
+                Ok(_) => close_sender.send(None).await,
+                Err(err) => close_sender.send(Some(err)).await,
+            }
         });
 
         let tx_clone = tx_write.clone();
         let peer_addr = p.get_addr();
         tokio::spawn(async move {
             loop {
-                info!("running select");
                 tokio::select! {
 
                     // message comming in from peer
                     // receive message from peer and expand it by peer information
                     // so that in can easily be processes in the server level
                     peer_rx_msg = rx_read.recv() => {
-                        info!("rx_read.recv()");
                         match peer_rx_msg {
                             Some(msg) => match msg_rx_sender.send((msg, peer_addr)).await {
-                                Ok(()) => debug!("recv completed"),
+                                Ok(_) => (),
                                 Err(e) => {
                                     error!("failed to receive message {}", e);
                                     todo!();
@@ -105,12 +114,12 @@ impl PeerHandler {
 
                     // broadcast message to peer
                     broadcast_msg = broadcast_receiver.recv() => {
-                        info!("got broadcast message");
                         match broadcast_msg {
                             Ok(msg) => match tx_clone.send(msg).await {
                                 Ok(()) => debug!("message send"),
                                 Err(e) => {
                                     error!("failed to broadcast {}", e);
+                                    todo!();
                                 },
                             },
                             Err(e) => {
@@ -120,6 +129,12 @@ impl PeerHandler {
                         }
                     }
 
+                    close_err = close_receiver.recv() => {
+                        match close_err {
+                            Some(Some(err)) => {error!("peer_handler: closed with error {}", err); todo!();}
+                            _ => {debug!("peer_handler: closed without errors"); todo!();}
+                        }
+                    }
                 }
             }
         });
@@ -176,8 +191,7 @@ async fn accept_connection(
 
 pub async fn run_p2p_server(
     addr_str: &str,
-    // tx: mpsc::Receiver<(message::envelope::Msg, SocketAddr)>,
-    // rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    rx: mpsc::Sender<ServerPeerMessage>,
     // pub_key: [u8; 256],
 ) -> Result<Arc<Server>, AddrParseError> {
     let addr: SocketAddr = match addr_str.parse() {
@@ -189,7 +203,7 @@ pub async fn run_p2p_server(
 
     let s = server.clone();
     tokio::spawn(async move {
-        match s.run().await {
+        match s.run(rx).await {
             Ok(()) => info!("p2p/server: executed finished"),
             Err(err) => error!("p2p/server: execution aborted due to error {}", err),
         }
@@ -250,7 +264,10 @@ impl Server {
         Ok({})
     }
 
-    pub async fn run(&self) -> io::Result<()> {
+    pub async fn run(
+        &self,
+        rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    ) -> Result<(), ServerError> {
         // lock rx_receiver channel
         // this also ensures only one run can be executed at a time
         let mut rx_receiver = self.rx_receiver.lock().await;
@@ -286,7 +303,10 @@ impl Server {
                         }
                     };
 
-                    todo!("peer messages not handled yet {:?} {}", msg, peer_addr)
+                    match rx.send((msg, peer_addr)).await {
+                        Ok(_) => (),
+                        Err(err) => return Err(ServerError::RxChannelError(err)),
+                    };
                 }
             }
         }

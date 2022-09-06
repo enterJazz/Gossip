@@ -29,6 +29,17 @@ message VerificationResponse {
   bytes signature = 4;
 }
 
+
+
+enum VerificationResponseStatus {
+  INVALID = 0;
+  OK = 1;
+}
+
+message VerificationValidationResponse {
+  VerificationResponseStatus status = 1;
+}
+
 message Peer {
   bytes identity = 1;
   Addr address = 2;
@@ -50,8 +61,9 @@ message Envelope {
   oneof msg {
     VerificationRequest verificationRequest = 2;
     VerificationResponse verificationResponse = 3;
-    Data data = 4;
-    Rumor rumor = 5;
-    PullRequest pull = 6;
+    VerificationValidationResponse verificationValidationResponse = 4;
+    Data data = 5;
+    Rumor rumor = 6;
+    PullRequest pull = 7;
   }
 }

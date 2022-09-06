@@ -1,4 +1,6 @@
-use crate::communication::p2p::message::{envelope, Envelope, VerificationRequest};
+use crate::communication::p2p::message::{
+    envelope, Envelope, VerificationRequest, VerificationResponse,
+};
 use bytes::BytesMut;
 use log::{debug, error, info, log_enabled, warn, Level};
 use prost::Message;
@@ -18,13 +20,23 @@ type RxStreamHalf = Arc<Mutex<tcp::OwnedReadHalf>>;
 type TxStreamHalf = Arc<Mutex<tcp::OwnedWriteHalf>>;
 
 #[derive(Error, Debug)]
+pub enum ChallengeError {
+    #[error("challenge exechange error")]
+    ExchangeError,
+    #[error("remote solution check failed")]
+    CheckFailed,
+}
+
+#[derive(Error, Debug)]
 pub enum PeerError {
     #[error("peer error: connection failed {0}")]
     Connection(#[from] io::Error),
-    #[error("peer error: challenge failed")]
-    Challenge(),
+    #[error("peer error: challenge failed {0}")]
+    Challenge(#[from] ChallengeError),
     #[error("peer error: could not read message")]
     Read(#[from] RecvError),
+    #[error("peer error: could not send message")]
+    Write(#[from] SendError),
 }
 
 #[derive(Error, Debug)]
@@ -125,22 +137,45 @@ impl Peer {
 
         debug!("p2p/peer/connect: reading message from {}", self.get_addr());
 
-        // TODO: handle errors
-        let env = self.read_msg().await?;
-
         debug!("p2p/peer/connect: finished reading message");
 
-        let msg = match env.msg {
-            Some(envelope::Msg::VerificationRequest(req)) => req.challenge,
-            _ => return Err(PeerError::Challenge()),
+        let req = match self.read_and_unwrap_msg().await? {
+            envelope::Msg::VerificationRequest(req) => req.challenge,
+            _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
         };
 
         info!(
             "P2P peer: got challenge value: {}",
-            str::from_utf8(&msg.to_vec()).unwrap()
+            str::from_utf8(&req.to_vec()).unwrap()
         );
 
-        Ok(())
+        // TODO: use actual validation here
+        // for now just send some placeholder
+
+        let resp = envelope::Msg::VerificationResponse(message::VerificationResponse {
+            challenge: req.to_vec(),
+            nonce: [0; 256].to_vec(),
+            pub_key: [0; 256].to_vec(),
+            signature: [0; 256].to_vec(),
+        });
+
+        // send challenge result
+        match self.send_and_wrap_msg(resp).await {
+            Ok(()) => (),
+            Err(err) => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
+        }
+
+        // wait for connection status
+        let challenge_status = match self.read_and_unwrap_msg().await? {
+            envelope::Msg::VerificationValidationResponse(resp) => resp.status,
+            _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
+        };
+
+        // verify remote response
+        match message::VerificationResponseStatus::from_i32(challenge_status) {
+            Some(message::VerificationResponseStatus::Ok) => Ok(()),
+            _ => Err(PeerError::Challenge(ChallengeError::CheckFailed)),
+        }
     }
 
     // initiate the connection process by publishing challenge to the other party defined by the underlying
@@ -153,23 +188,31 @@ impl Peer {
 
         if let Err(err) = self.send_and_wrap_msg(challenge_req).await {
             error!("P2P peer: failed to send challenge {}", err.to_string());
-            return Err(PeerError::Challenge());
+            return Err(PeerError::Challenge(ChallengeError::ExchangeError));
         }
 
         info!("P2P peer: challenge send");
 
-        match self.read_and_unwrap_msg().await {
+        let resp = match self.read_and_unwrap_msg().await {
             Ok(msg) => match msg {
-                message::envelope::Msg::VerificationResponse(resp) => (),
-                _ => return Err(PeerError::Challenge()),
+                message::envelope::Msg::VerificationResponse(resp) => resp,
+                _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
             },
-            Err(_) => return Err(PeerError::Challenge()),
+            Err(_) => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
         };
 
-        // TODO: handle responses
-        // let rx = self.rx.clone();
-        // // wait for response  // TODO: add delay
-        // tokio::spawn(async move { return Peer::read_msg(rx).await }).await;
+        // TODO: validate response
+
+        let resp_status_msg = envelope::Msg::VerificationValidationResponse(
+            message::VerificationValidationResponse {
+                status: message::VerificationResponseStatus::Ok as i32,
+            },
+        );
+        // send challenge status result
+        match self.send_and_wrap_msg(resp_status_msg).await {
+            Ok(()) => (),
+            Err(err) => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
+        }
 
         Ok(())
     }
@@ -253,17 +296,16 @@ impl Peer {
         &self,
         mut tx: mpsc::Receiver<envelope::Msg>,
         rx: mpsc::Sender<envelope::Msg>,
-    ) -> bool {
+    ) -> Result<(), PeerError> {
         loop {
             tokio::select! {
                 rx_msg = self.read_and_unwrap_msg() => {
-                    debug!("got message {:?}", rx_msg);
+                    debug!("peer: recv {:?}", rx_msg);
                     match rx_msg {
                         // TODO: remove optional wrapping aroung msg in envelope
                         Ok(msg) => rx.send(msg).await.unwrap(),
                         Err(err) => {
-                            warn!("failed to receive msg {}", err);
-                            continue;
+                            return Err(PeerError::Read(err))
                         },
                     }
                 }
@@ -274,10 +316,11 @@ impl Peer {
                         continue;
                     }
 
-                    debug!("sending data");
                     match self.send_and_wrap_msg(tx_msg.unwrap()).await {
-                        Ok(()) => debug!("msg send"),
-                        Err(err) => error!("failed to send {}", err)
+                        Ok(_) => (),
+                        Err(err) => {
+                            return Err(PeerError::Write(err))
+                        }
                     }
                 }
             }

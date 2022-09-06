@@ -1,6 +1,6 @@
 mod communication;
 use crate::communication::p2p::message;
-use crate::communication::p2p::server::Server;
+use crate::communication::p2p::server::run_p2p_server;
 use chrono::Local;
 use clap::Parser;
 use env_logger::Builder;
@@ -8,7 +8,8 @@ use log::LevelFilter;
 use log::{error, info};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::str;
+use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 struct Args {
