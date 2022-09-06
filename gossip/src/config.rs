@@ -34,6 +34,7 @@ pub enum ConfigError {
 }
 
 /// Configuration loaded from ini file
+#[derive(Debug, Clone)]
 pub struct Config {
     host_key_path: PathBuf,
     host_priv_key_pem: pem::Pem,
@@ -147,7 +148,7 @@ impl Config {
                     })?;
                 let _ = parsed_address_fields.insert(field_key.clone(), socketaddr_parsed_value);
             } else {
-                panic!("invalid state: invalid config key");
+                panic!("invalid state: invalid config key: {}", field_key);
             }
         }
 

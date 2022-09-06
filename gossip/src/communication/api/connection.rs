@@ -72,7 +72,7 @@ impl Connection {
                     info!("CONNECTION: closed");
                     return Ok(None);
                 } else {
-                    error!("CONNECTION: reset by peer");
+                    debug!("CONNECTION: reset by peer");
                     return Err("connection reset by peer".into());
                 }
             }

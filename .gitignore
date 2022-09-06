@@ -4,3 +4,4 @@ Cargo.lock
 
 # IDE specific
 .idea/
+__pycache__/

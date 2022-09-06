@@ -1,6 +1,7 @@
 //! Provides a type representing an API Gossip protocol message as well as utilities for
 //! parsing messages from a byte array.
 
+use log::debug;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::io::Cursor;
@@ -14,6 +15,9 @@ use super::payload::{
     announce::Announce, notification::Notification, notify::Notify, rps::peer::Peer,
     validation::Validation,
 };
+
+/// total length of header in bytes
+const HEADER_LEN: u16 = 4;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -59,16 +63,16 @@ impl ApiMessage {
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<ApiMessage, Error> {
         let header = Header::parse(src)?;
         Ok(match header.message_type {
-            MessageType::GossipAnnounce => ApiMessage::Announce(Announce::parse(src, header.size)?),
-            MessageType::GossipNotify => ApiMessage::Notify(Notify::parse(src, header.size)?),
+            MessageType::GossipAnnounce => ApiMessage::Announce(Announce::parse(src, header.get_message_body_size())?),
+            MessageType::GossipNotify => ApiMessage::Notify(Notify::parse(src, header.get_message_body_size())?),
             MessageType::GossipValidation => {
-                ApiMessage::Validation(Validation::parse(src, header.size)?)
+                ApiMessage::Validation(Validation::parse(src, header.get_message_body_size())?)
             }
             MessageType::GossipNotification => {
-                ApiMessage::Notification(Notification::parse(src, header.size)?)
+                ApiMessage::Notification(Notification::parse(src, header.get_message_body_size())?)
             }
             MessageType::RPSQuery => ApiMessage::RPSQuery,
-            MessageType::RPSPeer => ApiMessage::RPSPeer(Peer::parse(src, header.size)?),
+            MessageType::RPSPeer => ApiMessage::RPSPeer(Peer::parse(src, header.get_message_body_size())?),
         })
     }
 
@@ -162,11 +166,16 @@ impl Header {
     }
 
     fn parse(src: &mut Cursor<&[u8]>) -> Result<Header, Error> {
-        let size = get_u16(src)?;
+        let total_size = get_u16(src)?; // we save size of message as the size that is left of the message
         let message_code = get_u16(src)?;
         let message_type: MessageType =
             FromPrimitive::from_u16(message_code).ok_or(Error::Unknown { message_code })?;
+        debug!("API SERVER: parsing message with header {:?}", message_type.clone());
+        Ok(Header { size: total_size, message_type })
+    }
 
-        Ok(Header { size, message_type })
+    /// returns the size of the message body, which is exactly the total size of the message minus the header size
+    pub fn get_message_body_size(&self) -> u16 {
+        self.size - HEADER_LEN
     }
 }

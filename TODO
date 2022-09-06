@@ -1,0 +1,8 @@
+
+Todo:
+  ☐ Integrate feedback form SECK
+  ☐ Add integration tests
+
+Integration Tests:
+  ☐ Find Host Key Format
+  ☐ Replace host key paths in loaded config 

@@ -10,6 +10,9 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 struct Args {
+    /// If enabled, logs to stdout
+    #[clap(short, long)]
+    log_to_stdout: bool,
     /// Sets a custom config file
     #[clap(short, long, value_parser, value_name = "CONFIG_FILE")]
     config: Option<PathBuf>,
@@ -17,8 +20,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    Builder::new()
-        .format(|buf, record| {
+
+    let args = Args::parse();
+
+    let mut builder = Builder::new();
+    builder.format(|buf, record| {
             writeln!(
                 buf,
                 "[{} {}] {}:{} - {}",
@@ -35,11 +41,15 @@ async fn main() {
                 record.args(),
             )
         })
-        .filter(None, LevelFilter::Info)
-        .init();
+        .filter(None, LevelFilter::Info);
+    
+    if args.log_to_stdout {
+        builder.target(env_logger::Target::Stdout);
+    }
+    
+    builder.init();
 
     // TODO: parse config from args
-    let args = Args::parse();
     let config: config::Config;
     if let Some(config_path) = args.config {
         config = config::Config::load_config(config_path).unwrap();

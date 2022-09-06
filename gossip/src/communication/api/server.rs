@@ -313,8 +313,15 @@ impl Handler {
         loop {
             // handler either reads a message or receives a notification from the api
             tokio::select! {
-                maybe_message = self.connection.read_message() => {
-                    let message = match maybe_message.unwrap() {
+                result_message = self.connection.read_message() => {
+                    let maybe_message = match result_message {
+                        Ok(opt_m) => opt_m,
+                        Err(e) => {
+                            debug!("error while reading message from connection: {}", e);
+                            continue
+                        },
+                    };
+                    let message = match maybe_message {
                         Some(m) => m,
                         None => {
                             info!("API HANDLER: Connection closed gracefully");
