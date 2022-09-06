@@ -20,27 +20,21 @@ pub enum Error {
     Unexpected,
 }
 
-#[async_trait]
-pub trait Publish {
-    async fn publish(&mut self, data: common::Data) -> Result<(), Error>;
-}
-
 struct Publisher {
+    // channel from pub to api: send api messages
     pub_api_tx: mpsc::Sender<api::message::ApiMessage>,
+    // channel from api to pub: receive api messages or errors
     api_pub_rx: mpsc::Receiver<Result<ApiMessage, api::server::Error>>,
 }
 
 impl Publisher {
-    pub fn new(pub_api_tx: mpsc::Sender<api::message::ApiMessage>, api_pub_rx: mpsc::Receiver<Result<ApiMessage, api::server::Error>>) -> Self {
+    pub async fn new(pub_api_tx: mpsc::Sender<api::message::ApiMessage>, api_pub_rx: mpsc::Receiver<Result<ApiMessage, api::server::Error>>) -> Self {
         Self {
             pub_api_tx,
             api_pub_rx,
         }
     }
-}
 
-#[async_trait]
-impl Publish for Publisher {
     async fn publish(&mut self, data: common::Data) -> Result<(), Error> {
         // wrap data in Notification
         let message_id = random();
