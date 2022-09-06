@@ -22,6 +22,8 @@ type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("server peer close error")]
+    PeerCloseError,
     #[error("peer not found {0}")]
     PeerNotFound(SocketAddr),
     #[error("failed to sample random peer")]
@@ -50,6 +52,9 @@ pub struct Server {
 
     broadcast_sender: broadcast::Sender<message::envelope::Msg>,
     broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
+
+    peer_close_sender: mpsc::Sender<Option<PeerError>>,
+    peer_close_receiver: Arc<Mutex<mpsc::Receiver<Option<PeerError>>>>,
 }
 
 impl ServerState {
@@ -189,6 +194,17 @@ async fn accept_connection(
     });
 }
 
+async fn remove_connection(
+    state_ref: Arc<Mutex<ServerState>>,
+    addr: SocketAddr,
+) -> Option<PeerHandler> {
+    let mut state = state_ref.lock().await;
+
+    // TODO: properly close connection
+
+    state.peers.remove(&addr)
+}
+
 pub async fn run_p2p_server(
     addr_str: &str,
     rx: mpsc::Sender<ServerPeerMessage>,
@@ -214,11 +230,17 @@ pub async fn run_p2p_server(
 
 impl Server {
     pub async fn new(addr: SocketAddr) -> Self {
+        // construct underlaying TCP connection
+        // forcefully unwrap here, it is expected that server dies if tcp listener cannot be started
         let listener = TcpListener::bind(addr).await.unwrap();
 
+        // create channels for peer orchestration and handling
         let (rx_sender, rx_receiver) = mpsc::channel(512);
         let (tx_sender, tx_receiver) = mpsc::channel(512);
         let (broadcast_sender, broadcast_receiver) = broadcast::channel(512);
+
+        // channel for handling peer removal
+        let (peer_close_sender, peer_close_receiver) = mpsc::channel(512);
 
         Server {
             state: Arc::new(Mutex::new(ServerState::new())),
@@ -233,6 +255,9 @@ impl Server {
             // channel for receiving messages from peers
             rx_sender,
             rx_receiver: Arc::new(Mutex::new(rx_receiver)),
+
+            peer_close_sender,
+            peer_close_receiver: Arc::new(Mutex::new(peer_close_receiver)),
         }
     }
 
@@ -271,6 +296,7 @@ impl Server {
         // lock rx_receiver channel
         // this also ensures only one run can be executed at a time
         let mut rx_receiver = self.rx_receiver.lock().await;
+        let mut peer_close_receiver = self.peer_close_receiver.lock().await;
 
         loop {
             tokio::select! {
@@ -307,6 +333,19 @@ impl Server {
                         Ok(_) => (),
                         Err(err) => return Err(ServerError::RxChannelError(err)),
                     };
+                }
+
+                 // handle peer removals in case of errors
+                // does not include challenge errors (invalid peers will not be added to active pool)
+                // TODO: remove peer from active pool
+                peer_close = peer_close_receiver.recv() => {
+                    match peer_close {
+                        Some(Some(err)) => {
+                            error!("peer closed with error {}", err);
+                            return Err(ServerError::PeerCloseError);
+                        },
+                        _ => debug!("peer removing"),
+                    }
                 }
             }
         }
