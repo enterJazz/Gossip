@@ -125,7 +125,7 @@ impl Peer {
             remote_addr,
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
-            read_buffer: Arc::new(Mutex::new(BytesMut::with_capacity(8 * 1024))),
+            read_buffer: BytesMut::with_capacity(8 * 1024),
             identity: [0; 256],
             pub_key: [0; 256],
         };
