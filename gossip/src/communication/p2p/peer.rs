@@ -148,7 +148,10 @@ impl Peer {
     pub async fn connect(&mut self) -> PeerResult<()> {
         let rx = self.rx.clone();
 
-        debug!("p2p/peer/connect: reading message from {}", self.get_addr());
+        debug!(
+            "p2p/peer/connect: reading message from {}",
+            self.remote_addr()
+        );
 
         debug!("p2p/peer/connect: finished reading message");
 
