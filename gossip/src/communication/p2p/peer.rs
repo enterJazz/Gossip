@@ -86,33 +86,46 @@ impl PeerConnectionStatus {
     }
 }
 
+/// A connection to a remote Peer on the network
 pub struct Peer {
+    /// TCP connection read half
     pub rx: RxStreamHalf,
+    /// TCP connection write half
     pub tx: TxStreamHalf,
-    pub status: PeerConnectionStatus,
-    addr: SocketAddr,
 
-    // hash of public key and ip address of a peer
+    /// Connection status indicating verification state
+    pub status: PeerConnectionStatus,
+
+    /// Remote peer address
+    remote_addr: SocketAddr,
+
+    /// Hash of public key and ip address and port of a peer (only set after completed handshake)
     pub identity: [u8; 256],
+    /// Public key of remote peer (only set after completed handshake)
     pub pub_key: [u8; 256],
 
-    // buffer for reading messages.
-    read_buffer: BytesMut,
+    /// Internal buffer for reading incomming messages
+    read_buffer: Arc<Mutex<BytesMut>>,
 }
 
 impl Peer {
+    /// Returns a new Peer instance given a TCP connection
+    /// No handshake is performed at this step
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - TCP stream inteded for all communications to peer
     pub fn new(stream: TcpStream) -> Self {
-        let addr = stream.peer_addr().unwrap();
+        let remote_addr = stream.peer_addr().unwrap();
 
         let (rx, tx) = TcpStream::into_split(stream);
-
         return Peer {
             rx: Arc::new(Mutex::new(rx)),
             tx: Arc::new(Mutex::new(tx)),
-            addr,
+            remote_addr,
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
-            read_buffer: BytesMut::with_capacity(8 * 1024),
+            read_buffer: Arc::new(Mutex::new(BytesMut::with_capacity(8 * 1024))),
             identity: [0; 256],
             pub_key: [0; 256],
         };
@@ -135,7 +148,10 @@ impl Peer {
     pub async fn connect(&mut self) -> PeerResult<()> {
         let rx = self.rx.clone();
 
-        debug!("p2p/peer/connect: reading message from {}", self.get_addr());
+        debug!(
+            "p2p/peer/connect: reading message from {}",
+            self.remote_addr()
+        );
 
         debug!("p2p/peer/connect: finished reading message");
 
@@ -219,7 +235,6 @@ impl Peer {
 
     pub async fn send_and_wrap_msg(&self, msg: envelope::Msg) -> Result<(), SendError> {
         let envelope = Envelope { msg: Some(msg) };
-        debug!("sending to {}", self.addr);
         self.send_msg(envelope).await
     }
 
@@ -245,9 +260,10 @@ impl Peer {
 
     pub async fn read_msg(&self) -> Result<Envelope, RecvError> {
         let mut s = self.rx.lock().await;
-        let mut buf = BytesMut::with_capacity(8 * 1024);
+        // IDEA: @wlad maybe unify lock for rx and read_buffer
+        let mut buf = self.read_buffer.lock().await;
 
-        match s.read_buf(&mut buf).await {
+        match s.read_buf(&mut buf.as_mut()).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),
             Ok(n) => match Envelope::decode(&buf[..n]) {
                 Ok(msg) => Ok(msg),
@@ -260,12 +276,12 @@ impl Peer {
         }
     }
 
-    pub fn get_addr(&self) -> SocketAddr {
-        return self.addr;
+    pub fn remote_addr(&self) -> SocketAddr {
+        return self.remote_addr;
     }
 
     pub fn get_peer_addr(&self) -> message::Addr {
-        let addr = self.get_addr();
+        let addr = self.remote_addr;
 
         let mut msg_addr = message::Addr {
             ip: None,

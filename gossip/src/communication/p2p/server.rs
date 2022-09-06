@@ -98,7 +98,7 @@ impl PeerHandler {
         });
 
         let tx_clone = tx_write.clone();
-        let peer_addr = p.get_addr();
+        let peer_addr = p.remote_addr();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -182,7 +182,7 @@ async fn accept_connection(
         match peer.challenge().await {
             Ok(resp) => {
                 let mut state = state_ref.lock().await;
-                let addr = peer.get_addr();
+                let addr = peer.remote_addr();
                 info!(
                     "p2p/server/accept: completed challenge; result={:?} addr={}",
                     resp, addr
