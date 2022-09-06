@@ -105,7 +105,7 @@ pub struct Peer {
     pub pub_key: [u8; 256],
 
     /// Internal buffer for reading incomming messages
-    read_buffer: Arc<Mutex<BytesMut>>,
+    read_buffer: BytesMut,
 }
 
 impl Peer {
@@ -148,10 +148,7 @@ impl Peer {
     pub async fn connect(&mut self) -> PeerResult<()> {
         let rx = self.rx.clone();
 
-        debug!(
-            "p2p/peer/connect: reading message from {}",
-            self.remote_addr()
-        );
+        debug!("p2p/peer/connect: reading message from {}", self.get_addr());
 
         debug!("p2p/peer/connect: finished reading message");
 
@@ -260,10 +257,10 @@ impl Peer {
 
     pub async fn read_msg(&self) -> Result<Envelope, RecvError> {
         let mut s = self.rx.lock().await;
-        // IDEA: @wlad maybe unify lock for rx and read_buffer
-        let mut buf = self.read_buffer.lock().await;
+        // FIXME: @wlad use shared buffer!!!
+        let mut buf = BytesMut::with_capacity(8 * 1024);
 
-        match s.read_buf(&mut buf.as_mut()).await {
+        match s.read_buf(&mut buf).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),
             Ok(n) => match Envelope::decode(&buf[..n]) {
                 Ok(msg) => Ok(msg),
