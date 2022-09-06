@@ -160,10 +160,10 @@ impl Peer {
 
         match self.read_and_unwrap_msg().await {
             Ok(msg) => match msg {
-                message::envelope::Msg::VerificationResponse(resp) => Ok(()),
-                _ => Err(PeerError::Challenge()),
+                message::envelope::Msg::VerificationResponse(resp) => (),
+                _ => return Err(PeerError::Challenge()),
             },
-            _ => Err(PeerError::Challenge()),
+            Err(_) => return Err(PeerError::Challenge()),
         };
 
         // TODO: handle responses

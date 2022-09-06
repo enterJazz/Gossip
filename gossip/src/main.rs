@@ -32,55 +32,6 @@ async fn main() {
         .filter(None, LevelFilter::Debug)
         .init();
 
+    // TODO: parse config from args
     let args = Args::parse();
-    println!("Hello, world!");
-
-    let s1 = Arc::new(Server::new("127.0.0.1:1333".parse().unwrap()).await);
-    let s2 = Arc::new(Server::new("127.0.0.1:1334".parse().unwrap()).await);
-    let s3 = Arc::new(Server::new("127.0.0.1:1335".parse().unwrap()).await);
-
-    let s1_run = s1.clone();
-    tokio::spawn(async move {
-        _ = s1_run.run().await;
-    });
-    let s2_run = s2.clone();
-    tokio::spawn(async move {
-        _ = s2_run.run().await;
-    });
-    let s3_run = s3.clone();
-    tokio::spawn(async move {
-        _ = s3_run.run().await;
-    });
-
-    _ = tokio::spawn(async move {
-        _ = match s2.connect("127.0.0.1:1333".parse().unwrap()).await {
-            Ok(()) => (),
-            Err(e) => {
-                panic!("failed to connect {}", e);
-            }
-        }
-    })
-    .await;
-
-    _ = tokio::spawn(async move {
-        _ = match s3.connect("127.0.0.1:1333".parse().unwrap()).await {
-            Ok(()) => (),
-            Err(e) => {
-                panic!("failed to connect {}", e);
-            }
-        };
-    })
-    .await;
-
-    s1.print_conns().await;
-    let msg = message::envelope::Msg::Data(message::Data {
-        ttl: 1,
-        payload: "hello there".as_bytes().to_vec(),
-    });
-    match s1.broadcast(msg).await {
-        Ok(size) => info!("send okay {}", size),
-        Err(e) => error!("err {}", e),
-    };
-    // s2.print_conns().await;
-    // s3.print_conns().await;
 }

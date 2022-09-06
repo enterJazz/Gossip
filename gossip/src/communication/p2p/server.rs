@@ -3,6 +3,7 @@ use log::{debug, error, info, warn};
 use prost::Message;
 use rand::seq::IteratorRandom;
 use std::collections::HashMap;
+use std::net::AddrParseError;
 use std::sync::Arc;
 use std::{io, net::SocketAddr};
 use thiserror::Error;
@@ -10,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use super::message;
+use super::message::{self, addr};
 
 #[derive(Error, Debug)]
 pub enum ServerError {
@@ -65,7 +66,7 @@ struct PeerHandler {
 impl PeerHandler {
     fn new(
         peer: Peer,
-        mut msg_rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+        msg_rx_sender: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
         mut broadcast_receiver: PeerBroadcastReceiver,
     ) -> PeerHandler {
         let (rx_write, mut rx_read) = mpsc::channel(512);
@@ -82,12 +83,14 @@ impl PeerHandler {
         let peer_addr = p.get_addr();
         tokio::spawn(async move {
             loop {
+                info!("running select");
                 tokio::select! {
 
                     // message comming in from peer
                     // receive message from peer and expand it by peer information
                     // so that in can easily be processes in the server level
                     peer_rx_msg = rx_read.recv() => {
+                        info!("rx_read.recv()");
                         match peer_rx_msg {
                             Some(msg) => match msg_rx_sender.send((msg, peer_addr)).await {
                                 Ok(()) => debug!("recv completed"),
@@ -169,6 +172,30 @@ async fn accept_connection(
             Err(err) => error!("p2p/server/accept: challenge failed {}", err),
         }
     });
+}
+
+pub async fn run_p2p_server(
+    addr_str: &str,
+    // tx: mpsc::Receiver<(message::envelope::Msg, SocketAddr)>,
+    // rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
+    // pub_key: [u8; 256],
+) -> Result<Arc<Server>, AddrParseError> {
+    let addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(err) => return Err(err),
+    };
+
+    let server = Arc::new(Server::new(addr).await);
+
+    let s = server.clone();
+    tokio::spawn(async move {
+        match s.run().await {
+            Ok(()) => info!("p2p/server: executed finished"),
+            Err(err) => error!("p2p/server: execution aborted due to error {}", err),
+        }
+    });
+
+    Ok(server)
 }
 
 impl Server {
@@ -269,22 +296,8 @@ impl Server {
         &self,
         msg: message::envelope::Msg,
     ) -> Result<usize, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
+        info!("broadcast sending...");
         self.broadcast_sender.send(msg)
-    }
-
-    async fn more_peers_required(&self) -> bool {
-        let state = self.state.lock().await;
-
-        // TODO: @wlad adjust this computation
-        return state.peers.len() < state.max_parallel_connections;
-    }
-
-    pub async fn print_conns(&self) {
-        let state = self.state.lock().await;
-
-        for (addr, peer) in &state.peers {
-            println!("connected to {}", addr)
-        }
     }
 
     async fn get_peer_list(&self, exclude_addr: Option<SocketAddr>) -> Vec<message::Peer> {
@@ -364,6 +377,14 @@ impl Server {
         match peer_handle.msg_tx.send(pull_req).await {
             Ok(_) => Ok(()),
             Err(err) => Err(ServerError::PeerPullError),
+        }
+    }
+
+    pub async fn print_conns(&self) {
+        let state = self.state.lock().await;
+
+        for (addr, peer) in &state.peers {
+            println!("connected to {}", addr)
         }
     }
 }
