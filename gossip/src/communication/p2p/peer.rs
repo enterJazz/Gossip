@@ -96,14 +96,13 @@ pub struct Peer {
     /// Connection status indicating verification state
     pub status: PeerConnectionStatus,
 
-    /// Remote peer address
-    remote_addr: SocketAddr,
-
     /// Hash of public key and ip address and port of a peer (only set after completed handshake)
     pub identity: [u8; 256],
     /// Public key of remote peer (only set after completed handshake)
     pub pub_key: [u8; 256],
 
+    /// Remote peer address
+    remote_addr: SocketAddr,
     /// Internal buffer for reading incomming messages
     read_buffer: BytesMut,
 }
@@ -261,7 +260,7 @@ impl Peer {
     pub async fn read_msg(&self) -> Result<Envelope, RecvError> {
         let mut s = self.rx.lock().await;
         // FIXME: @wlad use shared buffer!!!
-        let mut buf = BytesMut::with_capacity(8 * 1024);
+        let mut buf = self.read_buffer.clone();
 
         match s.read_buf(&mut buf).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),

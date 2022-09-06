@@ -207,16 +207,23 @@ async fn remove_connection(
     state.peers.remove(&addr)
 }
 
-pub async fn run_p2p_server(
+pub async fn run_from_str_addr(
     addr_str: &str,
     rx: mpsc::Sender<(message::Data, SocketAddr)>,
-    // pub_key: [u8; 256],
 ) -> Result<Arc<Server>, AddrParseError> {
     let addr: SocketAddr = match addr_str.parse() {
         Ok(a) => a,
         Err(err) => return Err(err),
     };
 
+    Ok(run(addr, rx).await)
+}
+
+pub async fn run(
+    addr: SocketAddr,
+    rx: mpsc::Sender<(message::Data, SocketAddr)>,
+    // pub_key: [u8; 256],
+) -> Arc<Server> {
     let server = Arc::new(Server::new(addr).await);
 
     let s = server.clone();
@@ -227,7 +234,7 @@ pub async fn run_p2p_server(
         }
     });
 
-    Ok(server)
+    server
 }
 
 impl Server {

@@ -1,5 +1,7 @@
-use crate::communication::p2p::message;
-use crate::communication::p2p::server::run_p2p_server;
+use crate::{
+    communication::{api, p2p, p2p::message},
+    config::Config,
+};
 use log::{error, info};
 use std::str;
 use std::sync::Arc;
@@ -13,16 +15,16 @@ async fn p2p_broadcast_test() {
     let (rx_2, mut tx_2) = mpsc::channel(512);
     let (rx_3, mut tx_3) = mpsc::channel(512);
 
-    let s1 = match run_p2p_server("127.0.0.1:1333", rx_1).await {
+    let s1 = match p2p::server::run_from_str_addr("127.0.0.1:1333", rx_1).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };
 
-    let s2 = match run_p2p_server("127.0.0.1:1334", rx_2).await {
+    let s2 = match p2p::server::run_from_str_addr("127.0.0.1:1334", rx_2).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };
-    let s3 = match run_p2p_server("127.0.0.1:1335", rx_3).await {
+    let s3 = match p2p::server::run_from_str_addr("127.0.0.1:1335", rx_3).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };
@@ -46,6 +48,7 @@ async fn p2p_broadcast_test() {
 
     let msg = message::Data {
         ttl: 1,
+        data_type: 2,
         payload: payload.as_bytes().to_vec(),
     };
     match s1.broadcast(msg).await {

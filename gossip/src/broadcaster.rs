@@ -24,17 +24,13 @@ struct Broadcaster {
 }
 
 impl Broadcaster {
-    pub async fn run(mut self) -> BroadcasterError {
+    pub async fn run(mut self) -> Result<(), BroadcasterError> {
         todo!("start publisher");
         todo!("start api server");
         todo!("start p2p server");
 
         let p2p_server =
-            match p2p::server::run(self.config.get_p2p_address(), self.p2p_broadcast_tx).await {
-                Ok(s) => s,
-                Err(err) => panic!("failed to start server {}", err),
-            };
-
+            p2p::server::run(self.config.get_p2p_address(), self.p2p_broadcast_tx).await;
         // control loop
         loop {
             tokio::select! {
