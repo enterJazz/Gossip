@@ -1,9 +1,9 @@
 use clap::error;
 use log::{debug, error, info, log_enabled, warn, Level};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{
     communication::{api, p2p},
@@ -16,10 +16,17 @@ pub enum BroadcasterError {
     P2PServerFailed(#[from] p2p::server::ServerError),
 }
 
+struct KnowledgeItem {
+    data: p2p::message::Data,
+
+    sent_to: Vec<p2p::peer::PeerIdentity>,
+}
+
 struct View {
     cache_size: usize,
+
     // some hashmap of messages and which peers it was sent to ; s.t. we know if `degree` peers was reached (in this case we can remove message)
-    // ring buf of actual messages
+    knowledge_base: Vec<KnowledgeItem>,
 }
 
 struct Broadcaster {
@@ -28,6 +35,8 @@ struct Broadcaster {
     // p2p_broadcast_tx: mpsc::Sender<(p2p::message::Data, SocketAddr)>,
     // broadcast_p2p_rx: mpsc::Receiver<(p2p::message::Data, SocketAddr)>,
     config: Config,
+
+    view: Arc<Mutex<View>>,
 }
 
 fn api_msg_from_p2p(data: p2p::message::Data) -> api::message::ApiMessage {
@@ -48,7 +57,13 @@ fn p2p_msg_from_api(msg: api::payload::announce::Announce) -> p2p::message::Data
 
 impl Broadcaster {
     pub async fn new(config: Config) -> Broadcaster {
-        Broadcaster { config }
+        Broadcaster {
+            view: Arc::new(Mutex::new(View {
+                cache_size: config.get_cache_size(),
+                knowledge_base: Vec::new(),
+            })),
+            config,
+        }
     }
 
     pub async fn run(mut self) -> Result<(), BroadcasterError> {
@@ -65,7 +80,12 @@ impl Broadcaster {
         let (p2p_broadcaster_tx, p2p_broadcaster_rx) =
             mpsc::channel::<(p2p::message::Data, SocketAddr)>(512);
 
-        let p2p_server = p2p::server::run(self.config.get_p2p_address(), p2p_broadcaster_tx).await;
+        let p2p_server = p2p::server::run(
+            self.config.get_p2p_address(),
+            self.config.get_host_pub_key(),
+            p2p_broadcaster_tx,
+        )
+        .await;
         // control loop
         loop {
             tokio::select! {

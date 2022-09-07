@@ -1,4 +1,5 @@
 use ini::Ini;
+use log::error;
 use std::{collections::HashMap, fs, io, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
 use url::Url;
@@ -22,18 +23,40 @@ pub enum ConfigError {
     FieldMissing { field_name: String },
     #[error("Failed to parse field {field_name}: {err_msg}")]
     ParsingError { field_name: String, err_msg: String },
+    #[error("Failed to parse pem file: {0}")]
+    PemParseError(#[from] pem::PemError),
+    #[error("Failed to open pem file: {0}")]
+    PemOpenError(#[from] io::Error),
 }
 
 /// Configuration loaded from ini file
 pub struct Config {
+    host_priv_key_pem: pem::Pem,
+    host_pub_key_pem: pem::Pem,
     host_key_path: PathBuf,
-    key_pem: pem::Pem,
 
     cache_size: usize,
     degree: usize,
     bootstrapper: Url,
     p2p_address: SocketAddr,
     api_address: SocketAddr,
+}
+
+fn parse_pem(path: PathBuf) -> Result<pem::Pem, ConfigError> {
+    let file = match fs::read_to_string(path.clone()) {
+        Ok(f) => f,
+        Err(err) => {
+            println!(
+                "failed to read pem at: {:?}",
+                path.into_os_string().into_string()
+            );
+            return Err(ConfigError::PemOpenError(err));
+        }
+    };
+    match pem::parse(file) {
+        Ok(p) => Ok(p),
+        Err(err) => Err(ConfigError::PemParseError(err)),
+    }
 }
 
 impl Config {
@@ -44,7 +67,7 @@ impl Config {
                 path: path_to_config,
                 err_msg: e.to_string(),
             })?;
-        let host_key_path = conf
+        let mut host_key_path = conf
             .general_section()
             .get(HOST_KEY_PATH_FIELD)
             .ok_or(ConfigError::FieldMissing {
@@ -56,23 +79,17 @@ impl Config {
                 err_msg: e.to_string(),
             })?;
 
-        // TODO: check what file ending host_key_path should use
-        if host_key_path.is_file() {
-            let file = match fs::read_to_string(host_key_path) {
-                Ok(f) => f,
-                Err(err) => {
-                    return Err(ConfigError::ParsingError {
-                        field_name: "host_key_path".to_string(),
-                        err_msg: err.to_string(),
-                    })
-                }
-            };
-        } else {
-            return Err(ConfigError::ParsingError {
-                field_name: "host_key_path".to_string(),
-                err_msg: "host_key_path is not a file".to_string(),
-            });
-        }
+        let mut host_pub_key_path = host_key_path.clone();
+        host_pub_key_path.set_extension("pub");
+        let pub_key = match parse_pem(host_pub_key_path) {
+            Ok(key) => key,
+            Err(err) => return Err(err),
+        };
+
+        let priv_key = match parse_pem(host_key_path.clone()) {
+            Ok(key) => key,
+            Err(err) => return Err(err),
+        };
 
         let gossip_section =
             conf.section(Some(GOSSIP_SECTION_NAME))
@@ -141,6 +158,8 @@ impl Config {
 
         Ok(Self {
             host_key_path,
+            host_priv_key_pem: priv_key,
+            host_pub_key_pem: pub_key,
             cache_size: parsed_usize_fields[CACHE_SIZE_CONFIG_FIELD],
             degree: parsed_usize_fields[DEGREE_CONFIG_FIELD],
             bootstrapper: parsed_url_fields[BOOTSTRAPPER_CONFIG_FIELD].clone(),
@@ -151,6 +170,10 @@ impl Config {
 
     pub fn get_host_key_path(&self) -> &PathBuf {
         &self.host_key_path
+    }
+
+    pub fn get_host_pub_key(&self) -> bytes::Bytes {
+        bytes::Bytes::from(self.host_pub_key_pem.contents.clone())
     }
 
     pub fn get_cache_size(&self) -> usize {
