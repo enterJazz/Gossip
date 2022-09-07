@@ -1,19 +1,34 @@
-use crate::communication::p2p::message::{
-    envelope, Envelope, VerificationRequest, VerificationResponse,
+use crate::communication::p2p::{
+    message::{envelope, Envelope, VerificationRequest, VerificationResponse},
+    pow,
 };
-use bytes::BytesMut;
-use log::{debug, error, info, log_enabled, warn, Level};
+use bytes::{BufMut, BytesMut};
+use log::{debug, error, info};
 use prost::Message;
-use std::net::{IpAddr, Ipv4Addr};
-use std::str;
-use std::sync::Arc;
+use std::{
+    convert::TryInto,
+    net::{IpAddr, Ipv4Addr},
+};
+use std::{fmt, sync::Arc};
 use std::{io, net::SocketAddr};
+use std::{str, time::Duration};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::net::{tcp, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
+    net::{tcp, TcpStream},
+    sync::{mpsc, Mutex},
+    time::timeout,
+};
 
 use super::message;
+
+/// Peer identity is a Blake3 hahs of a peers public key
+pub type PeerIdentity = [u8; 32];
+
+pub fn peer_into_str(peer: PeerIdentity) -> String {
+    base64::encode(peer)
+}
 
 /// Shorthand for the receive half of the message channel.
 type RxStreamHalf = Arc<Mutex<tcp::OwnedReadHalf>>;
@@ -25,6 +40,8 @@ pub enum ChallengeError {
     ExchangeError,
     #[error("remote solution check failed")]
     CheckFailed,
+    #[error("challenge timeout exceeded")]
+    Timeout,
 }
 
 #[derive(Error, Debug)]
@@ -41,7 +58,7 @@ pub enum PeerError {
 
 #[derive(Error, Debug)]
 pub enum RecvError {
-    #[error("protoc decode error")]
+    #[error("protoc decode error {0}")]
     Decode(#[from] prost::DecodeError),
     #[error("received empty envelope")]
     EmptyEnvelope,
@@ -97,14 +114,18 @@ pub struct Peer {
     pub status: PeerConnectionStatus,
 
     /// Hash of public key and ip address and port of a peer (only set after completed handshake)
-    pub identity: [u8; 256],
+    pub identity: PeerIdentity,
     /// Public key of remote peer (only set after completed handshake)
-    pub pub_key: [u8; 256],
+    pub pub_key: bytes::Bytes,
 
     /// Remote peer address
     remote_addr: SocketAddr,
     /// Internal buffer for reading incomming messages
     read_buffer: BytesMut,
+}
+
+fn compute_identity(pub_key: &[u8]) -> PeerIdentity {
+    *blake3::hash(pub_key).as_bytes()
 }
 
 impl Peer {
@@ -115,6 +136,21 @@ impl Peer {
     ///
     /// * `stream` - TCP stream inteded for all communications to peer
     pub fn new(stream: TcpStream) -> Self {
+        Peer::new_with_identity(stream, [0; 32], bytes::Bytes::new())
+    }
+
+    pub async fn new_from_addr(addr: SocketAddr) -> PeerResult<Self> {
+        match TcpStream::connect(addr).await {
+            Ok(socket) => Ok(Peer::new(socket)),
+            Err(e) => Err(PeerError::Connection(e)),
+        }
+    }
+
+    pub fn new_with_identity(
+        stream: TcpStream,
+        identity: PeerIdentity,
+        pub_key: bytes::Bytes,
+    ) -> Self {
         let remote_addr = stream.peer_addr().unwrap();
 
         let (rx, tx) = TcpStream::into_split(stream);
@@ -125,16 +161,9 @@ impl Peer {
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
             read_buffer: BytesMut::with_capacity(8 * 1024),
-            identity: [0; 256],
-            pub_key: [0; 256],
+            identity: identity,
+            pub_key: pub_key,
         };
-    }
-
-    pub async fn new_from_addr(addr: SocketAddr) -> PeerResult<Self> {
-        match TcpStream::connect(addr).await {
-            Ok(socket) => Ok(Peer::new(socket)),
-            Err(e) => Err(PeerError::Connection(e)),
-        }
     }
 
     pub fn disconnect(&mut self) -> PeerResult<()> {
@@ -144,34 +173,56 @@ impl Peer {
     }
 
     // initiate a connection process to the remote defined by the underlying TCP Stream
-    pub async fn connect(&mut self) -> PeerResult<()> {
-        let rx = self.rx.clone();
-
-        debug!(
-            "p2p/peer/connect: reading message from {}",
-            self.remote_addr()
-        );
-
-        debug!("p2p/peer/connect: finished reading message");
+    pub async fn connect(
+        &mut self,
+        host_identity: PeerIdentity,
+        host_pub_key: bytes::Bytes,
+    ) -> PeerResult<PeerIdentity> {
+        debug!("reading message from {}", self.remote_addr());
 
         let req = match self.read_and_unwrap_msg().await? {
-            envelope::Msg::VerificationRequest(req) => req.challenge,
+            envelope::Msg::VerificationRequest(req) => req,
             _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
         };
 
-        info!(
-            "P2P peer: got challenge value: {}",
-            str::from_utf8(&req.to_vec()).unwrap()
+        // compute remote identity
+        let peer_identity: PeerIdentity = compute_identity(&req.pub_key);
+        debug!(
+            "received challenge, difficulty={} challenge={:?} peer={}",
+            req.difficulty,
+            req.challenge,
+            peer_into_str(peer_identity)
         );
 
-        // TODO: use actual validation here
-        // for now just send some placeholder
+        // ensure challenge has the correct length as expected by PoW module
+        let challenge: [u8; pow::CHALLENGE_LEN] = match req.challenge.as_slice().try_into() {
+            Ok(c) => c,
+            Err(err) => return Err(PeerError::Challenge(ChallengeError::CheckFailed)),
+        };
+
+        debug!(
+            "searching for solution src_id={} target_id={} challenge={:?}",
+            peer_into_str(peer_identity),
+            peer_into_str(host_identity),
+            challenge
+        );
+
+        // compute nonce based on self and remote identities
+        let nonce = pow::generate_proof_of_work(
+            peer_identity,
+            host_identity,
+            challenge,
+            req.difficulty as u8,
+        )
+        .await;
+
+        debug!("nonce found {:?}", nonce,);
 
         let resp = envelope::Msg::VerificationResponse(message::VerificationResponse {
-            challenge: req.to_vec(),
-            nonce: [0; 256].to_vec(),
-            pub_key: [0; 256].to_vec(),
-            signature: [0; 256].to_vec(),
+            challenge: req.challenge,
+            remote_identity: peer_identity.to_vec(),
+            nonce: nonce.to_vec(),
+            pub_key: host_pub_key.to_vec(),
         });
 
         // send challenge result
@@ -186,41 +237,109 @@ impl Peer {
             _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
         };
 
+        debug!(
+            "solution response-status received status={:?}",
+            challenge_status
+        );
+
         // verify remote response
         match message::VerificationResponseStatus::from_i32(challenge_status) {
-            Some(message::VerificationResponseStatus::Ok) => Ok(()),
+            Some(message::VerificationResponseStatus::Ok) => Ok(peer_identity),
+            Some(message::VerificationResponseStatus::Timeout) => {
+                Err(PeerError::Challenge(ChallengeError::Timeout))
+            }
             _ => Err(PeerError::Challenge(ChallengeError::CheckFailed)),
         }
     }
 
     // initiate the connection process by publishing challenge to the other party defined by the underlying
     // TCP Stream
-    pub async fn challenge(&mut self) -> PeerResult<()> {
+    pub async fn challenge(
+        &mut self,
+        host_identity: PeerIdentity,
+        host_pub_key: bytes::Bytes,
+    ) -> PeerResult<()> {
+        let challenge_timeout = Duration::from_secs(20);
+
+        let challenge = pow::generate_challenge().await;
+        let difficulty: u8 = 2;
+
         let challenge_req = envelope::Msg::VerificationRequest(VerificationRequest {
-            challenge: "test".as_bytes().to_vec(),
-            pub_key: "bla".as_bytes().to_vec(),
+            challenge: challenge.to_vec(),
+            // TODO: adjust difficulty
+            difficulty: difficulty as u32,
+            pub_key: host_pub_key.to_vec(),
         });
 
         if let Err(err) = self.send_and_wrap_msg(challenge_req).await {
-            error!("P2P peer: failed to send challenge {}", err.to_string());
+            error!("failed to send challenge {}", err.to_string());
             return Err(PeerError::Challenge(ChallengeError::ExchangeError));
         }
 
-        info!("P2P peer: challenge send");
+        debug!("waiting for challenge response");
 
-        let resp = match self.read_and_unwrap_msg().await {
-            Ok(msg) => match msg {
-                message::envelope::Msg::VerificationResponse(resp) => resp,
-                _ => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
+        // wait for response or timeout before returning result
+        let mut response: Option<VerificationResponse> = None;
+        let resp_future = self.read_and_unwrap_msg();
+
+        match timeout(challenge_timeout, resp_future).await {
+            // handle response incoming before timeout
+            Ok(timeout_resp) => match timeout_resp {
+                Ok(message::envelope::Msg::VerificationResponse(resp)) => response = Some(resp),
+                // invalid response message
+                Ok(_) => {
+                    debug!("received unexpected result");
+                    return Err(PeerError::Challenge(ChallengeError::ExchangeError));
+                }
+                // error during response read
+                Err(err) => {
+                    debug!("could not receive response message {}", err);
+                    return Err(PeerError::Challenge(ChallengeError::ExchangeError));
+                }
             },
-            Err(_) => return Err(PeerError::Challenge(ChallengeError::ExchangeError)),
+            Err(err) => error!("challenge timeout error {}", err),
         };
 
-        // TODO: validate response
+        let mut status: message::VerificationResponseStatus =
+            message::VerificationResponseStatus::Invalid;
+
+        // only if we got a response in time will this case happen
+        if let Some(resp) = response {
+            let remote_identity: PeerIdentity = compute_identity(&resp.pub_key);
+
+            debug!(
+                "received challenge solution with src_id={} target_id={} challenge={:?} nonce={:?}",
+                peer_into_str(host_identity),
+                peer_into_str(remote_identity),
+                challenge,
+                resp.nonce,
+            );
+
+            // make sure nonce has correct length
+            let nonce: [u8; pow::NONCE_LEN] = match resp.nonce.as_slice().try_into() {
+                Ok(c) => c,
+                Err(err) => return Err(PeerError::Challenge(ChallengeError::CheckFailed)),
+            };
+
+            let valid =
+                pow::validate_nonce(host_identity, remote_identity, challenge, nonce, difficulty)
+                    .await;
+
+            if valid {
+                status = message::VerificationResponseStatus::Ok;
+
+                // update values on peer
+                self.pub_key = bytes::Bytes::from(resp.pub_key);
+                self.identity = remote_identity
+            }
+        } else {
+            debug!("challenge response timeout exceeded");
+            status = message::VerificationResponseStatus::Timeout;
+        }
 
         let resp_status_msg = envelope::Msg::VerificationValidationResponse(
             message::VerificationValidationResponse {
-                status: message::VerificationResponseStatus::Ok as i32,
+                status: status as i32,
             },
         );
         // send challenge status result
@@ -260,7 +379,8 @@ impl Peer {
     pub async fn read_msg(&self) -> Result<Envelope, RecvError> {
         let mut s = self.rx.lock().await;
         // FIXME: @wlad use shared buffer!!!
-        let mut buf = self.read_buffer.clone();
+        // self.read_buffer.clear(); // BytesMut::with_capacity(8 * 1024);
+        let mut buf = BytesMut::with_capacity(8 * 1024);
 
         match s.read_buf(&mut buf).await {
             Ok(0) => Err(RecvError::InvalidLength(0)),

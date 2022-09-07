@@ -19,21 +19,23 @@ enum MsgTypes {
 
 message VerificationRequest {
   bytes challenge = 1;
-  bytes pub_key = 2;
+  uint32 difficulty = 2;
+  bytes pub_key = 3;
 }
 
 message VerificationResponse {
   bytes challenge = 1;
-  bytes pub_key = 2;
-  bytes nonce = 3;
-  bytes signature = 4;
+  bytes remote_identity = 2;
+  bytes pub_key = 3;
+  bytes nonce = 4;
 }
 
 
 
 enum VerificationResponseStatus {
   INVALID = 0;
-  OK = 1;
+  TIMEOUT = 1;
+  OK = 2;
 }
 
 message VerificationValidationResponse {
@@ -51,6 +53,7 @@ message Rumor {
 }
 
 message PullRequest { uint32 ttl = 1; }
+
 message Data {
   uint32 ttl = 1;
   uint32 data_type = 2;

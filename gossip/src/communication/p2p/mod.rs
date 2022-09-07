@@ -1,5 +1,6 @@
 // pub mod com;
 pub mod peer;
+pub mod pow;
 pub mod server;
 pub mod message {
     include!(concat!(

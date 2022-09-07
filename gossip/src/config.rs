@@ -31,9 +31,9 @@ pub enum ConfigError {
 
 /// Configuration loaded from ini file
 pub struct Config {
+    host_key_path: PathBuf,
     host_priv_key_pem: pem::Pem,
     host_pub_key_pem: pem::Pem,
-    host_key_path: PathBuf,
 
     cache_size: usize,
     degree: usize,
@@ -42,6 +42,7 @@ pub struct Config {
     api_address: SocketAddr,
 }
 
+/// Opens and parses a pem file at location path
 fn parse_pem(path: PathBuf) -> Result<pem::Pem, ConfigError> {
     let file = match fs::read_to_string(path.clone()) {
         Ok(f) => f,
@@ -67,7 +68,7 @@ impl Config {
                 path: path_to_config,
                 err_msg: e.to_string(),
             })?;
-        let mut host_key_path = conf
+        let host_key_path = conf
             .general_section()
             .get(HOST_KEY_PATH_FIELD)
             .ok_or(ConfigError::FieldMissing {

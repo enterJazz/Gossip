@@ -20,13 +20,21 @@ async fn main() {
         .format(|buf, record| {
             writeln!(
                 buf,
-                "{} [{}] - {}",
-                Local::now().format("%Y-%m-%dT%H:%M:%S"),
-                record.level(),
-                record.args()
+                "[{} {}] {}:{} - {}",
+                Local::now().format("%H:%M:%S"),
+                match record.level() {
+                    log::Level::Error => "ERR",
+                    log::Level::Warn => "WRN",
+                    log::Level::Info => "INF",
+                    log::Level::Debug => "DBG",
+                    log::Level::Trace => "TRC",
+                },
+                record.file().unwrap(),
+                record.line().unwrap(),
+                record.args(),
             )
         })
-        .filter(None, LevelFilter::Debug)
+        .filter(None, LevelFilter::Info)
         .init();
 
     // TODO: parse config from args

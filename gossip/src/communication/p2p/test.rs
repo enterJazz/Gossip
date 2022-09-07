@@ -15,16 +15,21 @@ async fn p2p_broadcast_test() {
     let (rx_2, mut tx_2) = mpsc::channel(512);
     let (rx_3, mut tx_3) = mpsc::channel(512);
 
-    let s1 = match p2p::server::run_from_str_addr("127.0.0.1:1333", rx_1).await {
+    // kreate some nonsense keys for peers
+    let k1 = bytes::Bytes::from("this is not a real key 01");
+    let k2 = bytes::Bytes::from("this is not a real key 02");
+    let k3 = bytes::Bytes::from("this is not a real key 03");
+
+    let s1 = match p2p::server::run_from_str_addr("127.0.0.1:1333", k1, rx_1).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };
 
-    let s2 = match p2p::server::run_from_str_addr("127.0.0.1:1334", rx_2).await {
+    let s2 = match p2p::server::run_from_str_addr("127.0.0.1:1334", k2, rx_2).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };
-    let s3 = match p2p::server::run_from_str_addr("127.0.0.1:1335", rx_3).await {
+    let s3 = match p2p::server::run_from_str_addr("127.0.0.1:1335", k3, rx_3).await {
         Ok(s) => s,
         Err(err) => panic!("failed to start server {}", err),
     };

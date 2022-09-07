@@ -1,18 +1,18 @@
-
-use rand::{self, RngCore};
 use blake3;
-use tokio::sync::{broadcast, mpsc};
 use log::error;
+use rand::{self, RngCore};
+use tokio::sync::{broadcast, mpsc};
 
 /// Number of concurrent tasks used to calculate nonce
 const N_TASKS: usize = 16;
 
+/// Length of the challenge field in bytes
+pub const CHALLENGE_LEN: usize = 4;
+/// Length of the nonce field in bytes
+pub const NONCE_LEN: usize = 4;
+
 /// Length of the identity field in bytes
 const ID_LEN: usize = 32;
-/// Length of the challenge field in bytes
-const CHALLENGE_LEN: usize = 4;
-/// Length of the nonce field in bytes
-const NONCE_LEN: usize = 4;
 /// Length of the generated blake3 hash
 const HASH_LEN: usize = 32;
 
@@ -37,8 +37,12 @@ pub async fn generate_proof_of_work(
     challenge: [u8; CHALLENGE_LEN],
     difficulty: u8,
 ) -> [u8; NONCE_LEN] {
-    let (mut close_tx, close_rx): (broadcast::Sender<()>, broadcast::Receiver<()>) = broadcast::channel(1);
-    let (nonce_tx, mut nonce_rx): (mpsc::Sender<[u8; NONCE_LEN]>, mpsc::Receiver<[u8; NONCE_LEN]>) = mpsc::channel(1);
+    let (mut close_tx, close_rx): (broadcast::Sender<()>, broadcast::Receiver<()>) =
+        broadcast::channel(1);
+    let (nonce_tx, mut nonce_rx): (
+        mpsc::Sender<[u8; NONCE_LEN]>,
+        mpsc::Receiver<[u8; NONCE_LEN]>,
+    ) = mpsc::channel(1);
 
     for _ in 0..N_TASKS {
         let mut close_rx = close_tx.subscribe();
@@ -68,14 +72,13 @@ pub async fn generate_proof_of_work(
         });
     }
 
-
     let nonce = nonce_rx.recv().await.unwrap();
     let _ = close_tx.send(()).unwrap_or_else(|e| {
         error!("closing tasks failed: {}", e);
         0
     });
 
-    return nonce
+    return nonce;
 }
 
 /// Validates if a given nonce along with other Connection Challenge parameters produces a valid hash.
@@ -98,12 +101,13 @@ async fn calculate_hash(
     challenge: [u8; CHALLENGE_LEN],
     nonce: [u8; NONCE_LEN],
 ) -> [u8; 32] {
-    let mut hash_input = [0u8; ID_LEN*2+CHALLENGE_LEN+NONCE_LEN];
+    let mut hash_input = [0u8; ID_LEN * 2 + CHALLENGE_LEN + NONCE_LEN];
 
     hash_input[..ID_LEN].clone_from_slice(&src_id);
-    hash_input[ID_LEN..ID_LEN*2].clone_from_slice(&target_id);
-    hash_input[ID_LEN*2..ID_LEN*2+CHALLENGE_LEN].clone_from_slice(&challenge);
-    hash_input[ID_LEN*2+CHALLENGE_LEN..ID_LEN*2+CHALLENGE_LEN+NONCE_LEN].clone_from_slice(&nonce);
+    hash_input[ID_LEN..ID_LEN * 2].clone_from_slice(&target_id);
+    hash_input[ID_LEN * 2..ID_LEN * 2 + CHALLENGE_LEN].clone_from_slice(&challenge);
+    hash_input[ID_LEN * 2 + CHALLENGE_LEN..ID_LEN * 2 + CHALLENGE_LEN + NONCE_LEN]
+        .clone_from_slice(&nonce);
 
     let candidate_hash = blake3::hash(&hash_input);
     *candidate_hash.as_bytes()
@@ -119,7 +123,7 @@ async fn check_hash_is_valid(hash: &[u8; HASH_LEN], difficulty: u8) -> bool {
 mod tests {
     use rand::RngCore;
 
-    use super::{generate_challenge, ID_LEN, NONCE_LEN, generate_proof_of_work, validate_nonce};
+    use super::{generate_challenge, generate_proof_of_work, validate_nonce, ID_LEN, NONCE_LEN};
 
     #[tokio::test]
     async fn test_generate_challenge() {
@@ -142,7 +146,8 @@ mod tests {
             target_id.clone(),
             challenge.clone(),
             difficulty,
-        ).await;
+        )
+        .await;
 
         assert!(
             validate_nonce(
@@ -151,7 +156,8 @@ mod tests {
                 challenge.clone(),
                 nonce,
                 difficulty,
-            ).await
+            )
+            .await
         )
     }
 }
