@@ -10,14 +10,16 @@ use std::{
 use thiserror::Error;
 
 use tokio::{
+    io,
+    net::TcpListener,
     sync::{mpsc, Mutex, RwLock},
     time::interval,
-    net::TcpListener, io
 };
 
 use crate::{
     communication::{api, p2p},
-    config::Config, publisher,
+    config::Config,
+    publisher,
 };
 
 #[derive(Error, Debug)]
@@ -171,7 +173,6 @@ impl Broadcaster {
         todo!("bootstrap");
         todo!("start publisher");
         todo!("start api server");
-        todo!("start p2p server");
 
         // broadcaster - api channels
         let (broadcaster_api_tx, mut broadcaster_api_rx) =
@@ -185,7 +186,7 @@ impl Broadcaster {
         // api - publisher channels
         let (pub_api_tx, pub_api_rx) = mpsc::channel(512);
         let (api_pub_tx, api_pub_rx) = mpsc::channel(512);
-        
+
         let publisher = publisher::Publisher::new(pub_api_tx, api_pub_rx).await;
         let api_listener = TcpListener::bind(self.config.get_api_address()).await?;
         let rps_address = todo!("get the rps addr from config");
@@ -196,9 +197,10 @@ impl Broadcaster {
                 api_pub_tx,
                 broadcaster_api_rx,
                 api_broadcaster_tx,
-            rps_address).await;
+                rps_address,
+            )
+            .await;
         });
-
 
         let p2p_server = p2p::server::run(
             self.config.get_p2p_address(),
@@ -208,8 +210,8 @@ impl Broadcaster {
         .await;
 
         // instantiate push pull interval timers
-        let push_interval = interval(Duration::from_secs(4));
-        let pull_interval = interval(Duration::from_secs(7));
+        let mut push_interval = interval(Duration::from_secs(4));
+        let mut pull_interval = interval(Duration::from_secs(7));
         // Gossip Push&Pull loop for spread and acquisition of information (Rule number 21 :)
         tokio::spawn(async move {
             loop {
@@ -217,12 +219,13 @@ impl Broadcaster {
 
                 tokio::select! {
                     push = push_interval.tick() => {
-                        let snapshot = self.view_snapshot().await;
-                        let rumor = snapshot.into_rumor();
-                        p2p_server.push(rumor);
+                        // FIXME: @wlad self is captured here
+                        // let snapshot = self.view_snapshot().await;
+                        // let rumor = snapshot.into_rumor();
+                        // p2p_server.push(rumor);
                     }
 
-                    pull = push_interval.tick() => {
+                    pull = pull_interval.tick() => {
                         p2p_server.pull();
                     }
 
@@ -231,7 +234,9 @@ impl Broadcaster {
         });
 
         // Main control loop handling interaction between P2P and API submodules
-        let mut knowledge_base = knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree()).await;
+        let mut knowledge_base =
+            knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree())
+                .await;
 
         // control loop
         loop {

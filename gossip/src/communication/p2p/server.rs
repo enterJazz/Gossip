@@ -26,8 +26,8 @@ type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 pub enum ServerError {
     #[error("server peer close error")]
     PeerCloseError,
-    #[error("peer not found {0}")]
-    PeerNotFound(SocketAddr),
+    #[error("peer not found {identity}")]
+    PeerNotFound { identity: String },
     #[error("failed to sample random peer")]
     PeerSamplingFailed,
     #[error("push failed")]
@@ -42,7 +42,7 @@ pub enum ServerError {
 
 struct ServerState {
     max_parallel_connections: usize,
-    active_peers: HashMap<SocketAddr, PeerHandler>,
+    active_peers: HashMap<PeerIdentity, PeerHandler>,
 }
 
 pub struct Server {
@@ -191,6 +191,7 @@ async fn accept_connection(
             Ok(resp) => {
                 let mut state = state_ref.lock().await;
                 let addr = peer.remote_addr();
+                let identity = peer.identity.clone();
                 info!(
                     "accept: completed challenge addr={}, id={}",
                     addr,
@@ -198,7 +199,7 @@ async fn accept_connection(
                 );
                 let handler = PeerHandler::new(peer, msg_rx_sender, broadcast_receiver);
                 // store peer state
-                state.active_peers.insert(addr, handler);
+                state.active_peers.insert(identity, handler);
             }
             Err(err) => error!("p2p/server/accept: challenge failed {}", err),
         }
@@ -207,7 +208,7 @@ async fn accept_connection(
 
 async fn remove_connection(
     state_ref: Arc<Mutex<ServerState>>,
-    addr: SocketAddr,
+    addr: PeerIdentity,
 ) -> Option<PeerHandler> {
     let mut state = state_ref.lock().await;
 
@@ -328,16 +329,18 @@ impl Server {
                         }
                     };
 
+
                     match msg {
-                        message::envelope::Msg::Data(data) => {
+                        message::envelope::Msg::VerificationRequest(_) |
+                        message::envelope::Msg::VerificationResponse(_) |
+                        message::envelope::Msg::VerificationValidationResponse(_) | message::envelope::Msg::Pull(_)  => {
+                            unreachable!("run: got internal message {:?}", msg)
+                        }
+                        msg => {
                             match rx.send((msg, peer_addr)).await {
                                 Ok(_) => (),
                                 Err(err) => return Err(ServerError::RxDataChannelError),
                             };
-                        }
-                        _ => {
-                            // TODO: handle incomming pull responses here
-                            debug!("run: got internal message {:?}", msg)
                         }
                     }
 
@@ -385,7 +388,7 @@ impl Server {
             self.broadcast_sender.subscribe(),
         );
         // store peer state
-        state.active_peers.insert(addr, handler);
+        state.active_peers.insert(identity, handler);
 
         info!("p2p/server/connect: peer {} added to active pool", addr);
 
@@ -395,7 +398,8 @@ impl Server {
     pub async fn broadcast(
         &self,
         data: message::Data,
-    ) -> Result<Vec<PeerIdentity>, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
+    ) -> Result<Vec<PeerIdentity>, tokio::sync::broadcast::error::SendError<message::envelope::Msg>>
+    {
         self.broadcast_sender
             .send(message::envelope::Msg::Data(data));
         info!("broadcast sending...");
@@ -404,7 +408,7 @@ impl Server {
 
     // select a random peer using
     // cryptographically random number generator
-    async fn sample_random_peer(&self) -> Result<SocketAddr, ServerError> {
+    async fn random_active_peer(&self) -> Result<PeerIdentity, ServerError> {
         let state = self.state.lock().await;
 
         if let Some(key) = state.active_peers.keys().choose(&mut rand::thread_rng()) {
@@ -415,15 +419,19 @@ impl Server {
     }
 
     pub async fn push(&self, rumor: message::Rumor) -> Result<(), ServerError> {
-        let random_peer_addr = match self.sample_random_peer().await {
+        let random_identity = match self.random_active_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),
         };
 
         let state = self.state.lock().await;
-        let peer_handle = match state.active_peers.get(&random_peer_addr) {
+        let peer_handle = match state.active_peers.get(&random_identity) {
             Some(peer) => peer,
-            None => return Err(ServerError::PeerNotFound(random_peer_addr)),
+            None => {
+                return Err(ServerError::PeerNotFound {
+                    identity: peer_into_str(random_identity),
+                })
+            }
         };
 
         // construct peer rumor packet
@@ -436,15 +444,19 @@ impl Server {
     }
 
     pub async fn pull(&self) -> Result<(), ServerError> {
-        let random_peer_addr = match self.sample_random_peer().await {
+        let random_identity = match self.random_active_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),
         };
 
         let state = self.state.lock().await;
-        let peer_handle = match state.active_peers.get(&random_peer_addr) {
+        let peer_handle = match state.active_peers.get(&random_identity) {
             Some(peer) => peer,
-            None => return Err(ServerError::PeerNotFound(random_peer_addr)),
+            None => {
+                return Err(ServerError::PeerNotFound {
+                    identity: peer_into_str(random_identity),
+                })
+            }
         };
 
         // request peer for its knowledge base
@@ -458,16 +470,16 @@ impl Server {
         }
     }
 
-    async fn get_peer_list(&self, exclude_addr: Option<SocketAddr>) -> Vec<message::Peer> {
+    async fn get_peer_list(&self, exclude_addr: Option<PeerIdentity>) -> Vec<message::Peer> {
         let state = self.state.lock().await;
 
         // IDEA: preallocate capacity since its always peers.length() - 1
         let mut peers: Vec<message::Peer> = Vec::new();
 
-        for (addr, peer_handler) in state.active_peers.iter() {
+        for (identitiy, peer_handler) in state.active_peers.iter() {
             // skip over exclude_addr if provided
             if let Some(exclude) = exclude_addr {
-                if exclude == *addr {
+                if exclude == *identitiy {
                     continue;
                 }
             }
@@ -480,8 +492,12 @@ impl Server {
     pub async fn print_conns(&self) {
         let state = self.state.lock().await;
 
-        for (addr, peer) in &state.active_peers {
-            println!("connected to {}", addr)
+        for (identity, peer) in &state.active_peers {
+            println!(
+                "connected to identity={} addr={:?}",
+                peer_into_str(*identity),
+                peer.peer.get_peer_addr()
+            )
         }
     }
 }

@@ -30,8 +30,6 @@ message VerificationResponse {
   bytes nonce = 4;
 }
 
-
-
 enum VerificationResponseStatus {
   INVALID = 0;
   TIMEOUT = 1;
