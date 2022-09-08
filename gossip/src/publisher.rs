@@ -20,7 +20,7 @@ pub enum Error {
     Unexpected,
 }
 
-struct Publisher {
+pub struct Publisher {
     // channel from pub to api: send api messages
     pub_api_tx: mpsc::Sender<api::message::ApiMessage>,
     // channel from api to pub: receive api messages or errors
