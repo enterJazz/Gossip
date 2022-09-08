@@ -1,6 +1,9 @@
-use std::{collections::hash_map::DefaultHasher, hash::{Hasher, Hash}};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
-use crate::communication::p2p::{peer, message::Data};
+use crate::communication::p2p::{message::Data, peer};
 
 use ringbuf;
 use thiserror::Error;
@@ -9,13 +12,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum KnowledgeError {
     #[error("failed to push data item to ring buf: {:?}", el)]
-    RingBufPushError {
-        el: Data,
-    },
+    RingBufPushError { el: Data },
     #[error("failed to update item; item is not contained in ring buf: {:?}", el)]
-    UpdateError {
-        el: Data,
-    }
+    UpdateError { el: Data },
 }
 
 /// ring buffer which holds data received from internal modules and other peers
@@ -47,11 +46,14 @@ impl KnowledgeBase {
             degree,
         }
     }
-    
+
     /// pushes data item to ringbuf if not already contained in ringbuf
     /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > 20
-    pub async fn push_data_item(&mut self, data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Result<(), KnowledgeError> {
-
+    pub async fn push_data_item(
+        &mut self,
+        data_item: Data,
+        sent_to: Vec<peer::PeerIdentity>,
+    ) -> Result<(), KnowledgeError> {
         // check if item already contained in ring buf
         let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
         if self.rb_cons.find(|x| x.id == data_hash).is_some() {
@@ -63,14 +65,20 @@ impl KnowledgeBase {
         if self.rb_cons.remaining() == 0 {
             self.churn_ring_buf().await?;
         }
-        self.rb_prod.push(knowledge_item).map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
+        self.rb_prod
+            .push(knowledge_item)
+            .map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
         Ok(())
     }
 
-    pub async fn update_sent_item_to_peers(&mut self, data_item: Data, peers: Vec<peer::PeerIdentity>) -> Result<(), KnowledgeError> {
+    pub async fn update_sent_item_to_peers(
+        &mut self,
+        data_item: Data,
+        peers: Vec<peer::PeerIdentity>,
+    ) -> Result<(), KnowledgeError> {
         let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
         let mut item_updated = false;
-        
+
         for ki in self.rb_cons.iter_mut() {
             if &ki.id == &data_hash {
                 // update peer sent_to
@@ -103,14 +111,15 @@ impl KnowledgeBase {
         for _ in 0..self.rb_cons.len() {
             if let Some(el) = self.rb_cons.pop() {
                 if !(el.sent_to_len().await >= self.degree) {
-                    self.rb_prod.push(el).map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
+                    self.rb_prod
+                        .push(el)
+                        .map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
                 }
             }
         }
         Ok(())
     }
 }
-
 
 impl KnowledgeItem {
     async fn new(data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Self {
@@ -131,7 +140,7 @@ impl KnowledgeItem {
     }
 
     async fn sent_to_len(&self) -> usize {
-        return self.sent_to.len()
+        return self.sent_to.len();
     }
 
     /// check if the knowledge item was sent to a given peer

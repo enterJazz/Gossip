@@ -1,7 +1,7 @@
-use std::fmt::{Debug, Display};
 use bytes::{Buf, Bytes};
-use std::io::Cursor;
 use log::debug;
+use std::fmt::{Debug, Display};
+use std::io::Cursor;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -10,10 +10,7 @@ pub enum Error {
     Incomplete,
 
     #[error("unknown value for field {}: {}", field_name, value)]
-    Unknown {
-        field_name: String,
-        value: String,
-    }
+    Unknown { field_name: String, value: String },
 }
 
 pub fn get_u8(src: &mut Cursor<&[u8]>) -> Result<u8, Error> {
@@ -45,7 +42,10 @@ pub fn get_size(src: &mut Cursor<&[u8]>, size: usize) -> Result<Bytes, Error> {
 
 pub fn skip(src: &mut Cursor<&[u8]>, n: usize) -> Result<(), Error> {
     if src.remaining() < n {
-        debug!("PARSE: not enough bytes for skip {n}; remaining: {}", src.remaining());
+        debug!(
+            "PARSE: not enough bytes for skip {n}; remaining: {}",
+            src.remaining()
+        );
         return Err(Error::Incomplete);
     }
 

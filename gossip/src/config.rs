@@ -167,17 +167,16 @@ impl Config {
                     section_name: RPS_SECTION_NAME.to_string(),
                 })?;
 
-        let rps_address = rps_section.get(RPS_ADDRESS_CONFIG_FIELD)
+        let rps_address = rps_section
+            .get(RPS_ADDRESS_CONFIG_FIELD)
             .ok_or(ConfigError::FieldMissing {
-                    field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
-                })?
-                .parse::<SocketAddr>()
-                .map_err(|e| ConfigError::ParsingError {
-                            field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
-                            err_msg: e.to_string(),
-                        })?;
-
-
+                field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
+            })?
+            .parse::<SocketAddr>()
+            .map_err(|e| ConfigError::ParsingError {
+                field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
+                err_msg: e.to_string(),
+            })?;
 
         Ok(Self {
             host_key_path,
@@ -230,7 +229,7 @@ mod tests {
     use super::{
         Config, API_ADDRESS_CONFIG_FIELD, BOOTSTRAPPER_CONFIG_FIELD, CACHE_SIZE_CONFIG_FIELD,
         DEGREE_CONFIG_FIELD, GOSSIP_SECTION_NAME, HOST_KEY_PATH_FIELD, P2P_ADDRESS_CONFIG_FIELD,
-        RPS_SECTION_NAME, RPS_ADDRESS_CONFIG_FIELD
+        RPS_ADDRESS_CONFIG_FIELD, RPS_SECTION_NAME,
     };
     use ini::Ini;
     use std::{net::SocketAddr, path::PathBuf};
@@ -298,12 +297,12 @@ mod tests {
         );
         assert_eq!(
             ini_conf
-            .section(Some(RPS_SECTION_NAME))
-            .unwrap()
-            .get(RPS_ADDRESS_CONFIG_FIELD)
-            .unwrap()
-            .parse::<SocketAddr>()
-            .unwrap(),
+                .section(Some(RPS_SECTION_NAME))
+                .unwrap()
+                .get(RPS_ADDRESS_CONFIG_FIELD)
+                .unwrap()
+                .parse::<SocketAddr>()
+                .unwrap(),
             generated_config.get_rps_address()
         )
     }

@@ -343,7 +343,6 @@ impl Server {
 
                         }
                     }
-
                 }
 
                  // handle peer removals in case of errors

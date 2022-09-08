@@ -1,12 +1,11 @@
-use rand::random;
-use thiserror::Error;
-use tokio::sync::mpsc;
 use crate::common;
 use crate::common::Data;
 use crate::communication::api;
 use crate::communication::api::message::ApiMessage;
 use async_trait::async_trait;
-
+use rand::random;
+use thiserror::Error;
+use tokio::sync::mpsc;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -28,7 +27,10 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    pub async fn new(pub_api_tx: mpsc::Sender<api::message::ApiMessage>, api_pub_rx: mpsc::Receiver<Result<ApiMessage, api::server::Error>>) -> Self {
+    pub async fn new(
+        pub_api_tx: mpsc::Sender<api::message::ApiMessage>,
+        api_pub_rx: mpsc::Receiver<Result<ApiMessage, api::server::Error>>,
+    ) -> Self {
         Self {
             pub_api_tx,
             api_pub_rx,
@@ -38,15 +40,17 @@ impl Publisher {
     pub async fn publish(&mut self, data: common::Data) -> Result<(), Error> {
         // wrap data in Notification
         let message_id = random();
-        let pub_msg = api::message::ApiMessage::Notification(
-            api::payload::notification::Notification {
+        let pub_msg =
+            api::message::ApiMessage::Notification(api::payload::notification::Notification {
                 message_id,
                 data_type: data.data_type,
                 data: data.data,
-            }
-        );
+            });
 
-        self.pub_api_tx.send(pub_msg).await.expect("failed to send pub message to api server");
+        self.pub_api_tx
+            .send(pub_msg)
+            .await
+            .expect("failed to send pub message to api server");
         let api_msg = self.api_pub_rx.recv().await.unwrap()?;
 
         match api_msg {

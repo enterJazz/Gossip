@@ -1,7 +1,7 @@
+use crate::communication::api::parse::{get_size, get_u16, Error};
+use bytes::Bytes;
 use std::io::Cursor;
 use std::mem;
-use bytes::Bytes;
-use crate::communication::api::parse::{Error, get_size, get_u16};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
@@ -21,9 +21,8 @@ impl Notification {
     }
 
     pub fn get_size(&self) -> u16 {
-        (mem::size_of_val(&self.message_id) +
-            mem::size_of_val(&self.message_id) +
-            self.data.len()) as u16
+        (mem::size_of_val(&self.message_id) + mem::size_of_val(&self.message_id) + self.data.len())
+            as u16
     }
 
     pub fn parse(src: &mut Cursor<&[u8]>, size: u16) -> Result<Self, Error> {

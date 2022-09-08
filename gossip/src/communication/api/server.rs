@@ -8,14 +8,13 @@ use std::net::SocketAddr;
 
 use crate::communication::api::connection::Connection;
 use crate::communication::api::message::ApiMessage;
-use log::{debug, info, warn, error};
+use log::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
-
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -129,7 +128,14 @@ pub async fn run(
 
     // transmitter must be given to publisher
     // idea: publisher passes receiver upon run
-    server.run(pub_api_rx, api_pub_tx, broadcaster_api_rx, api_broadcaster_tx).await;
+    server
+        .run(
+            pub_api_rx,
+            api_pub_tx,
+            broadcaster_api_rx,
+            api_broadcaster_tx,
+        )
+        .await;
 }
 
 impl Listener {
@@ -370,22 +376,22 @@ impl Handler {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::thread;
-    use std::time::Duration;
-    use bytes::Bytes;
     use crate::communication::api::connection::Connection;
     use crate::communication::api::message::ApiMessage;
     use crate::communication::api::message::MessageType::GossipNotify;
     use crate::communication::api::payload::notification::Notification;
+    use crate::communication::api::payload::notify::Notify;
+    use crate::communication::api::payload::rps::peer::{Module, Peer, PortMapRecord};
     use crate::communication::api::server::run;
+    use bytes::Bytes;
     use log::{debug, info, warn};
     use num_traits::FromPrimitive;
+    use std::net::SocketAddr;
+    use std::thread;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
-    use crate::communication::api::payload::notify::Notify;
-    use crate::communication::api::payload::rps::peer::{Module, Peer, PortMapRecord};
 
     const API_TEST_ADDR: &str = "0.0.0.0:1337";
     const RPS_TEST_ADDR: &str = "0.0.0.0:1338";
@@ -402,13 +408,16 @@ mod tests {
             0b00000010, 0b00001000, // App 2: NSE (520)
             0, 0, // App 2 port 0
             0, 0, 0, 0, // Ipv4 Addr: 0.0.0.0
-            0b00000001, 0b00000001, 0b00000001, 0b00000001, // some bytes which could be a peer's DER host key
+            0b00000001, 0b00000001, 0b00000001,
+            0b00000001, // some bytes which could be a peer's DER host key
         ];
 
         let payload_size: u8 = u8::from_usize(*&mock_rps_peer_msg_payload.len()).unwrap();
         let mock_rps_peer_header: Vec<u8> = vec![
-            0, (payload_size + 2), // size
-            0b00000010, 0b00011101, // message code: RPS PEER (541)
+            0,
+            (payload_size + 2), // size
+            0b00000010,
+            0b00011101, // message code: RPS PEER (541)
         ];
 
         mock_rps_peer_msg.extend(mock_rps_peer_header);
@@ -429,7 +438,6 @@ mod tests {
                 stream.write(&peer_msg).await.unwrap();
                 stream.flush().await.unwrap();
             });
-
         }
     }
 
@@ -468,14 +476,16 @@ mod tests {
 
         debug!("starting api server");
         tokio::spawn(async move {
-            run(api_listener,
+            run(
+                api_listener,
                 test_pub_server_rx,
                 server_test_pub_tx,
                 test_broadcaster_server_rx,
                 server_test_broadcaster_tx,
-            rps_address).await;
+                rps_address,
+            )
+            .await;
         });
-
 
         // serialized messages to send
         // subscription
@@ -524,22 +534,20 @@ mod tests {
 
         let bytes: Vec<u8> = vec![1, 1, 1, 1];
         let data = Bytes::from(bytes);
-        let check_msg = ApiMessage::RPSPeer(
-            Peer {
-                address: "0.0.0.0:0".parse().unwrap(),
-                port_map_records: vec![
-                    PortMapRecord {
-                        module: Module::DHT,
-                        port: 0,
-                    },
-                    PortMapRecord {
-                        module: Module::NSE,
-                        port: 0,
-                    },
-                ],
-                host_key: data,
-            }
-        );
+        let check_msg = ApiMessage::RPSPeer(Peer {
+            address: "0.0.0.0:0".parse().unwrap(),
+            port_map_records: vec![
+                PortMapRecord {
+                    module: Module::DHT,
+                    port: 0,
+                },
+                PortMapRecord {
+                    module: Module::NSE,
+                    port: 0,
+                },
+            ],
+            host_key: data,
+        });
 
         assert_eq!(recv_msg, check_msg);
     }

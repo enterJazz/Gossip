@@ -11,8 +11,8 @@ use crate::communication::api::parse::{self, get_u16, skip};
 use thiserror::Error;
 
 use super::payload::{
-    announce::Announce, notification::Notification, notify::Notify, validation::Validation,
-    rps::peer::Peer,
+    announce::Announce, notification::Notification, notify::Notify, rps::peer::Peer,
+    validation::Validation,
 };
 
 #[derive(Error, Debug)]
@@ -103,10 +103,18 @@ impl ApiMessage {
         match self {
             ApiMessage::Notification(n) => Ok(n.get_size()),
             ApiMessage::RPSQuery => Ok(0),
-            ApiMessage::Announce(_) => Err(Unexpected { message_type: MessageType::GossipAnnounce }),
-            ApiMessage::Notify(_) => Err(Unexpected { message_type: MessageType::GossipNotify }),
-            ApiMessage::Validation(_) => Err(Unexpected { message_type: MessageType::GossipValidation }),
-            ApiMessage::RPSPeer(_) => Err(Unexpected { message_type: MessageType::RPSPeer }),
+            ApiMessage::Announce(_) => Err(Unexpected {
+                message_type: MessageType::GossipAnnounce,
+            }),
+            ApiMessage::Notify(_) => Err(Unexpected {
+                message_type: MessageType::GossipNotify,
+            }),
+            ApiMessage::Validation(_) => Err(Unexpected {
+                message_type: MessageType::GossipValidation,
+            }),
+            ApiMessage::RPSPeer(_) => Err(Unexpected {
+                message_type: MessageType::RPSPeer,
+            }),
         }
     }
 }
