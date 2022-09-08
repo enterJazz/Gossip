@@ -35,7 +35,7 @@ impl Publisher {
         }
     }
 
-    async fn publish(&mut self, data: common::Data) -> Result<(), Error> {
+    pub async fn publish(&mut self, data: common::Data) -> Result<(), Error> {
         // wrap data in Notification
         let message_id = random();
         let pub_msg = api::message::ApiMessage::Notification(

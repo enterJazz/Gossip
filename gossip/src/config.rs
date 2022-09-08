@@ -5,6 +5,7 @@ use thiserror::Error;
 use url::Url;
 
 const GOSSIP_SECTION_NAME: &str = "gossip";
+const RPS_SECTION_NAME: &str = "rps";
 
 const HOST_KEY_PATH_FIELD: &str = "hostkey";
 const CACHE_SIZE_CONFIG_FIELD: &str = "cache_size";
@@ -12,6 +13,8 @@ const DEGREE_CONFIG_FIELD: &str = "degree";
 const BOOTSTRAPPER_CONFIG_FIELD: &str = "bootstrapper";
 const P2P_ADDRESS_CONFIG_FIELD: &str = "p2p_address";
 const API_ADDRESS_CONFIG_FIELD: &str = "api_address";
+
+const RPS_ADDRESS_CONFIG_FIELD: &str = "rps_address";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -40,6 +43,7 @@ pub struct Config {
     bootstrapper: Url,
     p2p_address: SocketAddr,
     api_address: SocketAddr,
+    rps_address: SocketAddr,
 }
 
 /// Opens and parses a pem file at location path
@@ -157,6 +161,24 @@ impl Config {
             }
         }
 
+        let rps_section =
+            conf.section(Some(RPS_SECTION_NAME))
+                .ok_or(ConfigError::SectionMissing {
+                    section_name: RPS_SECTION_NAME.to_string(),
+                })?;
+
+        let rps_address = rps_section.get(RPS_ADDRESS_CONFIG_FIELD)
+            .ok_or(ConfigError::FieldMissing {
+                    field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
+                })?
+                .parse::<SocketAddr>()
+                .map_err(|e| ConfigError::ParsingError {
+                            field_name: RPS_ADDRESS_CONFIG_FIELD.to_string(),
+                            err_msg: e.to_string(),
+                        })?;
+
+
+
         Ok(Self {
             host_key_path,
             host_priv_key_pem: priv_key,
@@ -166,6 +188,7 @@ impl Config {
             bootstrapper: parsed_url_fields[BOOTSTRAPPER_CONFIG_FIELD].clone(),
             p2p_address: parsed_address_fields[P2P_ADDRESS_CONFIG_FIELD],
             api_address: parsed_address_fields[API_ADDRESS_CONFIG_FIELD],
+            rps_address,
         })
     }
 
@@ -196,6 +219,10 @@ impl Config {
     pub fn get_api_address(&self) -> SocketAddr {
         self.api_address
     }
+
+    pub fn get_rps_address(&self) -> SocketAddr {
+        self.rps_address
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +230,7 @@ mod tests {
     use super::{
         Config, API_ADDRESS_CONFIG_FIELD, BOOTSTRAPPER_CONFIG_FIELD, CACHE_SIZE_CONFIG_FIELD,
         DEGREE_CONFIG_FIELD, GOSSIP_SECTION_NAME, HOST_KEY_PATH_FIELD, P2P_ADDRESS_CONFIG_FIELD,
+        RPS_SECTION_NAME, RPS_ADDRESS_CONFIG_FIELD
     };
     use ini::Ini;
     use std::{net::SocketAddr, path::PathBuf};
@@ -268,5 +296,15 @@ mod tests {
                 .unwrap(),
             generated_config.get_api_address()
         );
+        assert_eq!(
+            ini_conf
+            .section(Some(RPS_SECTION_NAME))
+            .unwrap()
+            .get(RPS_ADDRESS_CONFIG_FIELD)
+            .unwrap()
+            .parse::<SocketAddr>()
+            .unwrap(),
+            generated_config.get_rps_address()
+        )
     }
 }

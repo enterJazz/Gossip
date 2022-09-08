@@ -171,8 +171,6 @@ impl Broadcaster {
 
     pub async fn run(mut self) -> Result<(), BroadcasterError> {
         todo!("bootstrap");
-        todo!("start publisher");
-        todo!("start api server");
 
         // broadcaster - api channels
         let (broadcaster_api_tx, mut broadcaster_api_rx) =
@@ -189,7 +187,7 @@ impl Broadcaster {
 
         let publisher = publisher::Publisher::new(pub_api_tx, api_pub_rx).await;
         let api_listener = TcpListener::bind(self.config.get_api_address()).await?;
-        let rps_address = todo!("get the rps addr from config");
+        let rps_address = self.config.get_rps_address();
         tokio::spawn(async move {
             api::server::run(
                 api_listener,
@@ -287,12 +285,15 @@ impl Broadcaster {
                                 // Data items will be added to the knowledge base after completing the verification step
                                 // within the P2P module
                                 p2p::message::envelope::Msg::Data(data) => {
-                                    let msg = api_msg_from_p2p(data);
                                     // for now only forward message to api
-                                    broadcaster_api_tx.send(msg);
+                                    match publisher.publish(
+                                        crate::common::Data { data_type: (data.data_type as u16), data: bytes::Bytes::from(data.payload) })
+                                        .await {
+                                            Ok(_) => todo!(),
+                                            Err(_) => todo!("check publisher error kind and react accordingly; lets us know if error is form message being not well-formed"),
+                                        };
                                     // TODO: add messages for verification tracking
-                                }
-
+                                },
                                 // Rumors are used to update the peers view of the "world"
                                 // these messages might be received via a Push or Pull (asynchronously after pull request)
                                 p2p::message::envelope::Msg::Rumor(rumor) => {
