@@ -219,7 +219,7 @@ async fn remove_connection(
 pub async fn run_from_str_addr(
     addr_str: &str,
     host_pub_key: bytes::Bytes,
-    rx: mpsc::Sender<(message::Data, SocketAddr)>,
+    rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
 ) -> Result<Arc<Server>, AddrParseError> {
     let addr: SocketAddr = match addr_str.parse() {
         Ok(a) => a,
@@ -232,7 +232,7 @@ pub async fn run_from_str_addr(
 pub async fn run(
     addr: SocketAddr,
     host_pub_key: bytes::Bytes,
-    rx: mpsc::Sender<(message::Data, SocketAddr)>,
+    rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
     // pub_key: [u8; 256],
 ) -> Arc<Server> {
     let server = Arc::new(Server::new(addr, host_pub_key).await);
@@ -288,7 +288,7 @@ impl Server {
 
     pub async fn run(
         &self,
-        rx: mpsc::Sender<(message::Data, SocketAddr)>,
+        rx: mpsc::Sender<(message::envelope::Msg, SocketAddr)>,
     ) -> Result<(), ServerError> {
         // lock rx_receiver channel
         // this also ensures only one run can be executed at a time
@@ -330,7 +330,7 @@ impl Server {
 
                     match msg {
                         message::envelope::Msg::Data(data) => {
-                            match rx.send((data, peer_addr)).await {
+                            match rx.send((msg, peer_addr)).await {
                                 Ok(_) => (),
                                 Err(err) => return Err(ServerError::RxDataChannelError),
                             };
@@ -413,7 +413,7 @@ impl Server {
         }
     }
 
-    async fn push(&self) -> Result<(), ServerError> {
+    pub async fn push(&self, rumor: message::Rumor) -> Result<(), ServerError> {
         let random_peer_addr = match self.sample_random_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),
@@ -425,21 +425,16 @@ impl Server {
             None => return Err(ServerError::PeerNotFound(random_peer_addr)),
         };
 
-        let peers = self.get_peer_list(Some(random_peer_addr)).await;
         // construct peer rumor packet
-        let rumor = message::envelope::Msg::Rumor(message::Rumor {
-            // FIXME: use correct ttl
-            ttl: 1,
-            peers: peers,
-        });
+        let payload = message::envelope::Msg::Rumor(rumor);
 
-        match peer_handle.msg_tx.send(rumor).await {
+        match peer_handle.msg_tx.send(payload).await {
             Ok(_) => Ok(()),
             Err(err) => Err(ServerError::PeerPushError),
         }
     }
 
-    async fn pull(&self) -> Result<(), ServerError> {
+    pub async fn pull(&self) -> Result<(), ServerError> {
         let random_peer_addr = match self.sample_random_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),

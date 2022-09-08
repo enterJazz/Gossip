@@ -1,9 +1,18 @@
 use clap::error;
 use log::{debug, error, info, log_enabled, warn, Level};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryInto,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::{
+    sync::{mpsc, Mutex, RwLock},
+    time::interval,
+};
 
 use crate::{
     communication::{api, p2p},
@@ -22,11 +31,87 @@ struct KnowledgeItem {
     sent_to: Vec<p2p::peer::PeerIdentity>,
 }
 
+struct PeerViewItem {
+    is_active: bool,
+    info: p2p::message::Peer,
+}
+
+impl PeerViewItem {
+    fn from(peer: p2p::message::Peer) -> Self {
+        PeerViewItem {
+            is_active: false,
+            info: peer,
+        }
+    }
+}
+
+fn parse_identity(buf: &[u8]) -> Option<p2p::peer::PeerIdentity> {
+    match buf.try_into() {
+        Ok(id) => Some(id),
+        Err(err) => None,
+    }
+}
+
 struct View {
     cache_size: usize,
 
-    // some hashmap of messages and which peers it was sent to ; s.t. we know if `degree` peers was reached (in this case we can remove message)
-    knowledge_base: Vec<KnowledgeItem>,
+    known_peers: HashMap<p2p::peer::PeerIdentity, PeerViewItem>,
+}
+
+impl View {
+    fn new(cache_size: usize) -> Self {
+        View {
+            cache_size,
+            known_peers: HashMap::new(),
+        }
+    }
+
+    /// Merge combines the current view with incoming information about peers
+    fn merge(&mut self, rumor: p2p::message::Rumor) {
+        // find peers we know nothing about yet
+        let new_unknown_peers: Vec<(p2p::peer::PeerIdentity, p2p::message::Peer)> = rumor
+            .peers
+            .iter()
+            .filter_map(|peer| {
+                if let Some(identity) = parse_identity(&peer.identity) {
+                    // only returbn item if we don't already know about it
+                    return if self.known_peers.contains_key(&identity) {
+                        None
+                    } else {
+                        Some((identity, peer.clone()))
+                    };
+                }
+                // TODO: maybe handle updates for already known peers
+                None
+            })
+            .collect();
+
+        for (identity, peer) in new_unknown_peers {
+            if self.known_peers.len() < self.cache_size {
+            } else {
+                debug!("view cache already full dropping pull result");
+                break;
+            }
+            self.known_peers.insert(identity, PeerViewItem::from(peer));
+        }
+    }
+
+    fn into_rumor(self) -> p2p::message::Rumor {
+        p2p::message::Rumor {
+            ttl: 1,
+            peers: self
+                .known_peers
+                .into_values()
+                .map(|peer| peer.info)
+                .collect(),
+        }
+    }
+}
+
+impl Clone for View {
+    fn clone(&self) -> Self {
+        todo!()
+    }
 }
 
 struct Broadcaster {
@@ -36,7 +121,10 @@ struct Broadcaster {
     // broadcast_p2p_rx: mpsc::Receiver<(p2p::message::Data, SocketAddr)>,
     config: Config,
 
-    view: Arc<Mutex<View>>,
+    view: Arc<RwLock<View>>,
+
+    // some hashmap of messages and which peers it was sent to ; s.t. we know if `degree` peers was reached (in this case we can remove message)
+    knowledge_base: Vec<KnowledgeItem>,
 }
 
 fn api_msg_from_p2p(data: p2p::message::Data) -> api::message::ApiMessage {
@@ -58,12 +146,20 @@ fn p2p_msg_from_api(msg: api::payload::announce::Announce) -> p2p::message::Data
 impl Broadcaster {
     pub async fn new(config: Config) -> Broadcaster {
         Broadcaster {
-            view: Arc::new(Mutex::new(View {
-                cache_size: config.get_cache_size(),
-                knowledge_base: Vec::new(),
-            })),
+            view: Arc::new(RwLock::new(View::new(config.get_cache_size()))),
+            knowledge_base: Vec::new(),
             config,
         }
+    }
+
+    async fn view_snapshot(self) -> View {
+        self.view.read().await.clone()
+    }
+
+    // Internal update method used to merge current view and incoming rumor
+    async fn update_view(self, rumor: p2p::message::Rumor) {
+        let mut view = self.view.write().await;
+        view.merge(rumor)
     }
 
     pub async fn run(mut self) -> Result<(), BroadcasterError> {
@@ -78,7 +174,7 @@ impl Broadcaster {
             mpsc::channel::<Result<api::message::ApiMessage, api::message::Error>>(512);
         let (broadcaster_p2p_tx, mut broadcaster_p2p_rx) = mpsc::channel::<p2p::message::Data>(512);
         let (p2p_broadcaster_tx, p2p_broadcaster_rx) =
-            mpsc::channel::<(p2p::message::Data, SocketAddr)>(512);
+            mpsc::channel::<(p2p::message::envelope::Msg, SocketAddr)>(512);
 
         let p2p_server = p2p::server::run(
             self.config.get_p2p_address(),
@@ -86,45 +182,90 @@ impl Broadcaster {
             p2p_broadcaster_tx,
         )
         .await;
-        // control loop
+
+        // instantiate push pull interval timers
+        let push_interval = interval(Duration::from_secs(4));
+        let pull_interval = interval(Duration::from_secs(7));
+        // Gossip Push&Pull loop for spread and acquisition of information (Rule number 21 :)
+        tokio::spawn(async move {
+            loop {
+                // TODO: stop this loop if server is down
+
+                tokio::select! {
+                    push = push_interval.tick() => {
+                        let snapshot = self.view_snapshot().await;
+                        let rumor = snapshot.into_rumor();
+                        p2p_server.push(rumor);
+                    }
+
+                    pull = push_interval.tick() => {
+                        p2p_server.pull();
+                    }
+
+                }
+            }
+        });
+
+        // Main control loop handling interaction between P2P and API submodules
         loop {
             tokio::select! {
-                            incoming_api_msg = api_broadcaster_rx.recv() => {
-                                match incoming_api_msg {
-                                    Some(Ok(api::message::ApiMessage::Announce(msg))) => {
-                                        p2p_server.broadcast(p2p_msg_from_api(msg)).await;
-                                    },
-                                    Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
-                                        // TODO: add host key parameter
-                                        // TODO: parse PortMapRecord to get correct port for P2P peer
-                                        // try connecting to new peer
-                                        p2p_server.connect(peer.address);
-                                    },
-                                    Some(Ok(_)) => error!("received unexepcted message from API in brodcaster"),
-                                    Some(Err(err)) => {
-                                        warn!("message invalid, forwarding prevented: {}", err);
-                                        // TODO: handle invalid messages or do nothing
-                                    }
-                                    None => (),
-                                }
-                                todo!("broadcast via p2p")
-                            },
-                            incoming_broadcast_msg = p2p_broadcaster_rx.recv() => {
-                                match incoming_broadcast_msg {
-                                    Some((data, peer_addr)) => {
-                                        let msg = api_msg_from_p2p(data);
-                                        // for now only forward message to api
-                                        broadcaster_api_tx.send(msg);
-                                    }
-                                    _ => ()
+
+                incoming_api_msg = api_broadcaster_rx.recv() => {
+                    match incoming_api_msg {
+                        Some(Ok(api::message::ApiMessage::Announce(msg))) => {
+                            p2p_server.broadcast(p2p_msg_from_api(msg)).await;
+                        },
+                        Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
+                            // TODO: add host key parameter
+                            // TODO: parse PortMapRecord to get correct port for P2P peer
+                            // try connecting to new peer
+                            p2p_server.connect(peer.address);
+                        },
+                        Some(Ok(_)) => error!("received unexepcted message from API in brodcaster"),
+                        Some(Err(err)) => {
+                            warn!("message invalid, forwarding prevented: {}", err);
+                            // TODO: handle invalid messages or do nothing
+                        }
+                        None => (),
+                    }
+                    todo!("broadcast via p2p")
+                },
+
+                // External ---> P2P ---> Broadcaster
+                // handle messages from other peers
+                // NOTE:
+                // - not all messages are exepcted here (only relevant for upper layers)
+                // - peers sending messages here must have completed the PoW verification process
+                incoming_broadcast_msg = p2p_broadcaster_rx.recv() => {
+                    match incoming_broadcast_msg {
+                        Some((msg, peer_addr)) => {
+                            match msg {
+                                // Data messages from p2p module are forwarded here to the Api level for further processing
+                                // Data items will be added to the knowledge base after completing the verification step
+                                // within the P2P module
+                                p2p::message::envelope::Msg::Data(data) => {
+                                    let msg = api_msg_from_p2p(data);
+                                    // for now only forward message to api
+                                    broadcaster_api_tx.send(msg);
+                                    // TODO: add messages for verification tracking
                                 }
 
-                                todo!("broadcast via p2p")
-                            },
-            //                _ = todo!("periodic push / pull ?").await => {
-            //                    todo!("do some things; send to rps ?");
-            //                }
-                        };
+                                // Rumors are used to update the peers view of the "world"
+                                // these messages might be received via a Push or Pull (asynchronously after pull request)
+                                p2p::message::envelope::Msg::Rumor(rumor) => {
+                                    // update view asynchronously to prevent halting the receiver future
+                                    self.update_view(rumor);
+                                }
+                                _ => unreachable!("no further messages should be delivered to the broadcastery")
+                            }
+                        }
+                        // ignore empty results
+                        _ => ()
+                    }
+
+                    todo!("broadcast via p2p")
+                },
+            };
         }
     }
 }
