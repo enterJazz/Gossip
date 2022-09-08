@@ -1,3 +1,5 @@
+mod knowledge;
+
 use clap::error;
 use log::{debug, error, info, log_enabled, warn, Level};
 use std::{
@@ -207,29 +209,38 @@ impl Broadcaster {
         });
 
         // Main control loop handling interaction between P2P and API submodules
+        let mut knowledge_base = knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree()).await;
+
+        // control loop
         loop {
             tokio::select! {
-
                 incoming_api_msg = api_broadcaster_rx.recv() => {
                     match incoming_api_msg {
                         Some(Ok(api::message::ApiMessage::Announce(msg))) => {
-                            p2p_server.broadcast(p2p_msg_from_api(msg)).await;
+                            let data = p2p_msg_from_api(msg);
+                            let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
+                                error!("failed to broadcast msg to peers: {}", e);
+                                vec![]
+                            });
+                            knowledge_base.update_sent_item_to_peers(data, reached_peers)
+                                .await
+                                .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
+
                         },
                         Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
                             // TODO: add host key parameter
                             // TODO: parse PortMapRecord to get correct port for P2P peer
                             // try connecting to new peer
-                            p2p_server.connect(peer.address);
+                            p2p_server.connect(peer.address).await;
                         },
-                        Some(Ok(_)) => error!("received unexepcted message from API in brodcaster"),
+                        Some(Ok(_)) => error!("received unexpected message from API in broadcaster"),
                         Some(Err(err)) => {
                             warn!("message invalid, forwarding prevented: {}", err);
                             // TODO: handle invalid messages or do nothing
                         }
                         None => (),
                     }
-                    todo!("broadcast via p2p")
-                },
+                }
 
                 // External ---> P2P ---> Broadcaster
                 // handle messages from other peers
