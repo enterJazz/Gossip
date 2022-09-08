@@ -395,10 +395,11 @@ impl Server {
     pub async fn broadcast(
         &self,
         data: message::Data,
-    ) -> Result<usize, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
-        info!("broadcast sending...");
+    ) -> Result<Vec<PeerIdentity>, tokio::sync::broadcast::error::SendError<message::envelope::Msg>> {
         self.broadcast_sender
-            .send(message::envelope::Msg::Data(data))
+            .send(message::envelope::Msg::Data(data));
+        info!("broadcast sending...");
+        Ok(vec![])
     }
 
     // select a random peer using

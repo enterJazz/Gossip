@@ -1,3 +1,5 @@
+mod knowledge;
+
 use clap::error;
 use log::{debug, error, info, log_enabled, warn, Level};
 use std::{net::SocketAddr, sync::Arc};
@@ -16,17 +18,11 @@ pub enum BroadcasterError {
     P2PServerFailed(#[from] p2p::server::ServerError),
 }
 
-struct KnowledgeItem {
-    data: p2p::message::Data,
-
-    sent_to: Vec<p2p::peer::PeerIdentity>,
-}
-
 struct View {
     cache_size: usize,
 
     // some hashmap of messages and which peers it was sent to ; s.t. we know if `degree` peers was reached (in this case we can remove message)
-    knowledge_base: Vec<KnowledgeItem>,
+    // knowledge_base: Vec<KnowledgeItem>,
 }
 
 struct Broadcaster {
@@ -60,7 +56,7 @@ impl Broadcaster {
         Broadcaster {
             view: Arc::new(Mutex::new(View {
                 cache_size: config.get_cache_size(),
-                knowledge_base: Vec::new(),
+                // knowledge_base: Vec::new(),
             })),
             config,
         }
@@ -92,15 +88,17 @@ impl Broadcaster {
                             incoming_api_msg = api_broadcaster_rx.recv() => {
                                 match incoming_api_msg {
                                     Some(Ok(api::message::ApiMessage::Announce(msg))) => {
+                                        // TODO: add to knowledge base, check degree; receive peer List; broadcast until degree or ringBuf: lose item; give knowledge base messages unique ID
+                                        // NOTE: ring buffer should have no double entries ; for now hash of message ; later maybe message ID + hash of message
                                         p2p_server.broadcast(p2p_msg_from_api(msg)).await;
                                     },
                                     Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
                                         // TODO: add host key parameter
                                         // TODO: parse PortMapRecord to get correct port for P2P peer
                                         // try connecting to new peer
-                                        p2p_server.connect(peer.address);
+                                        p2p_server.connect(peer.address).await;
                                     },
-                                    Some(Ok(_)) => error!("received unexepcted message from API in brodcaster"),
+                                    Some(Ok(_)) => error!("received unexpected message from API in broadcaster"),
                                     Some(Err(err)) => {
                                         warn!("message invalid, forwarding prevented: {}", err);
                                         // TODO: handle invalid messages or do nothing
