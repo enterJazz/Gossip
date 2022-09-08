@@ -26,6 +26,8 @@ type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 pub enum ServerError {
     #[error("server peer close error")]
     PeerCloseError,
+    #[error("could not transfer message to peer handler")]
+    PeerSendError,
     #[error("peer not found {identity}")]
     PeerNotFound { identity: String },
     #[error("failed to sample random peer")]
@@ -394,6 +396,24 @@ impl Server {
         Ok({})
     }
 
+    pub async fn send_to_peer(
+        self,
+        identity: PeerIdentity,
+        msg: message::envelope::Msg,
+    ) -> Result<(), ServerError> {
+        let state = self.state.lock().await;
+        if let Some(peer) = state.active_peers.get(&identity) {
+            // TODO: make sure actual transmission has happened
+            match peer.msg_tx.send(msg).await {
+                Ok(_) => return Ok(()),
+                Err(_) => return Err(ServerError::PeerSendError),
+            }
+        }
+        Err(ServerError::PeerNotFound {
+            identity: peer_into_str(identity),
+        })
+    }
+
     pub async fn broadcast(
         &self,
         data: message::Data,
@@ -402,6 +422,7 @@ impl Server {
         self.broadcast_sender
             .send(message::envelope::Msg::Data(data));
         info!("broadcast sending...");
+        // TODO: @wlad refactor to return IDs of peers to which the broadcast was send to
         Ok(vec![])
     }
 
