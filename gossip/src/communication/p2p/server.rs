@@ -328,7 +328,7 @@ impl Server {
                         }
                     };
 
-                    match msg {
+                    match &msg {
                         message::envelope::Msg::Data(data) => {
                             match rx.send((msg, peer_addr)).await {
                                 Ok(_) => (),
