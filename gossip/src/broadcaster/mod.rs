@@ -80,17 +80,25 @@ impl Broadcaster {
             self.config.get_p2p_address(),
             self.config.get_host_pub_key(),
             p2p_broadcaster_tx,
-        )
-        .await;
+        ).await;
+
+        let mut knowledge_base = knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree()).await;
+
         // control loop
         loop {
             tokio::select! {
                             incoming_api_msg = api_broadcaster_rx.recv() => {
                                 match incoming_api_msg {
                                     Some(Ok(api::message::ApiMessage::Announce(msg))) => {
-                                        // TODO: add to knowledge base, check degree; receive peer List; broadcast until degree or ringBuf: lose item; give knowledge base messages unique ID
-                                        // NOTE: ring buffer should have no double entries ; for now hash of message ; later maybe message ID + hash of message
-                                        p2p_server.broadcast(p2p_msg_from_api(msg)).await;
+                                        let data = p2p_msg_from_api(msg);
+                                        let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
+                                            error!("failed to broadcast msg to peers: {}", e);
+                                            vec![]
+                                        });
+                                        knowledge_base.update_sent_item_to_peers(data, reached_peers)
+                                            .await
+                                            .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
+
                                     },
                                     Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
                                         // TODO: add host key parameter

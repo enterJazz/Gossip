@@ -51,6 +51,13 @@ impl KnowledgeBase {
     /// pushes data item to ringbuf if not already contained in ringbuf
     /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > 20
     pub async fn push_data_item(&mut self, data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Result<(), KnowledgeError> {
+
+        // check if item already contained in ring buf
+        let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
+        if self.rb_cons.find(|x| x.id == data_hash).is_some() {
+            return Ok(());
+        };
+
         let knowledge_item = KnowledgeItem::new(data_item, sent_to).await;
 
         if self.rb_cons.remaining() == 0 {
@@ -77,6 +84,18 @@ impl KnowledgeBase {
             self.push_data_item(data_item, peers).await?;
         }
         Ok(())
+    }
+
+    /// returns all data items of knowledge items which were not sent to a given peer
+    /// used when a new peer ID is discovered to send cached data items to it
+    pub async fn get_peer_unsent_items(&self, peer_id: peer::PeerIdentity) -> Vec<Data> {
+        let mut peer_unsent_items = vec![];
+        for item in self.rb_cons.iter() {
+            if !item.check_sent_to_peer(&peer_id).await {
+                peer_unsent_items.push(item.data_item.clone());
+            }
+        }
+        peer_unsent_items
     }
 
     /// removes any items in ring buf where the peer list is larger than `degree`
@@ -113,6 +132,11 @@ impl KnowledgeItem {
 
     async fn sent_to_len(&self) -> usize {
         return self.sent_to.len()
+    }
+
+    /// check if the knowledge item was sent to a given peer
+    async fn check_sent_to_peer(&self, peer_id: &peer::PeerIdentity) -> bool {
+        self.sent_to.contains(peer_id)
     }
 
     async fn gen_data_item_id(data_item: &Data) -> u64 {
