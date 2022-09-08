@@ -331,16 +331,16 @@ impl Server {
 
 
                     match msg {
-                        message::envelope::Msg::VerificationRequest(_) |
-                        message::envelope::Msg::VerificationResponse(_) |
-                        message::envelope::Msg::VerificationValidationResponse(_) | message::envelope::Msg::Pull(_)  => {
-                            unreachable!("run: got internal message {:?}", msg)
-                        }
-                        msg => {
+                        message::envelope::Msg::Data(_) |
+                        message::envelope::Msg::Rumor(_)  => {
                             match rx.send((msg, peer_addr)).await {
                                 Ok(_) => (),
                                 Err(err) => return Err(ServerError::RxDataChannelError),
                             };
+                        }
+                        _ => {
+                            unreachable!("run: got internal message {:?}", msg)
+
                         }
                     }
 
