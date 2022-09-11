@@ -404,10 +404,7 @@ impl Server {
         let state = self.state.lock().await;
         if let Some(peer) = state.active_peers.get(&identity) {
             // TODO: make sure actual transmission has happened
-            match peer.msg_tx.send(msg).await {
-                Ok(_) => return Ok(()),
-                Err(_) => return Err(ServerError::PeerSendError),
-            }
+            peer.msg_tx.send(msg).await.map_err(|_| ServerError::PeerSendError)?;
         }
         Err(ServerError::PeerNotFound {
             identity: peer_into_str(identity),

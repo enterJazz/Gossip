@@ -231,6 +231,9 @@ impl Broadcaster {
             }
         });
 
+
+        // TODO: send knowledge item when: new peer arrives, new knowledge item arrives -> integrate into main control loop
+
         // Main control loop handling interaction between P2P and API submodules
         let mut knowledge_base =
             knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree())
@@ -285,20 +288,49 @@ impl Broadcaster {
                                 // Data items will be added to the knowledge base after completing the verification step
                                 // within the P2P module
                                 p2p::message::envelope::Msg::Data(data) => {
+                                    // check if ttl is 0; if yes, drop
+                                    // @wlad: is this correct ttl handling?
+                                    if data.ttl == 0 {
+                                        info!("dropping incoming broadcast message as ttl is 0");
+                                        continue
+                                    } else {
+                                        // decrement ttl
+                                        data.ttl -= 1;
+                                    }
                                     // for now only forward message to api
-                                    match publisher.publish(
+                                    if let Err(e) = publisher.publish(
                                         crate::common::Data { data_type: (data.data_type as u16), data: bytes::Bytes::from(data.payload) })
                                         .await {
-                                            Ok(_) => todo!(),
-                                            Err(_) => todo!("check publisher error kind and react accordingly; lets us know if error is form message being not well-formed"),
-                                        };
+                                        match e {
+                                            publisher::Error::ApiServerError(e) => {
+                                                error!("api server error: {e} - skipping broadcast");
+                                                continue
+                                            },
+                                            publisher::Error::Invalid => {
+                                                error!("received message is not well-formed - skipping broadcast");
+                                                continue
+                                            },
+                                            publisher::Error::Unexpected => {
+                                                error!("received unexpected validation reply");
+                                            },
+                                        }
+                                    };
+                                    // TODO: @wlad how do we make sure we don't broadcast the message back to the sender? (avoid echo)
+                                    // TODO: duplicate code
+                                    let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
+                                        error!("failed to broadcast msg to peers: {}", e);
+                                        vec![]
+                                    });
+                                    knowledge_base.update_sent_item_to_peers(data, reached_peers)
+                                        .await
+                                        .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                                     // TODO: add messages for verification tracking
                                 },
                                 // Rumors are used to update the peers view of the "world"
                                 // these messages might be received via a Push or Pull (asynchronously after pull request)
                                 p2p::message::envelope::Msg::Rumor(rumor) => {
                                     // update view asynchronously to prevent halting the receiver future
-                                    self.update_view(rumor);
+                                    self.update_view(rumor).await;
                                 }
                                 _ => unreachable!("no further messages should be delivered to the broadcastery")
                             }

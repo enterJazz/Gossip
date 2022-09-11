@@ -56,30 +56,31 @@ async fn p2p_broadcast_test() {
         data_type: 2,
         payload: payload.as_bytes().to_vec(),
     };
-    match s1.broadcast(msg).await {
-        Ok(size) => info!("send okay {}", size),
-        Err(e) => error!("err {}", e),
-    };
-
-    loop {
-        match tx_2.recv().await {
-            Some((data, addr)) => {
-                println!("s2: got message from {}", addr);
-                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-                break;
-            }
-            None => (),
-        }
-    }
-
-    loop {
-        match tx_3.recv().await {
-            Some((data, addr)) => {
-                println!("s3: got message from {}", addr);
-                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-                break;
-            }
-            None => (),
-        }
-    }
+    return todo!("fix @wlad");
+//    match s1.broadcast(msg).await {
+//        Ok(size) => info!("send okay {}", size),
+//        Err(e) => error!("err {}", e),
+//    };
+//
+//    loop {
+//        match tx_2.recv().await {
+//            Some((data, addr)) => {
+//                println!("s2: got message from {}", addr);
+//                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
+//                break;
+//            }
+//            None => (),
+//        }
+//    }
+//
+//    loop {
+//        match tx_3.recv().await {
+//            Some((data, addr)) => {
+//                println!("s3: got message from {}", addr);
+//                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
+//                break;
+//            }
+//            None => (),
+//        }
+//    }
 }

@@ -5,8 +5,74 @@ use std::{
 
 use crate::communication::p2p::{message::Data, peer};
 
-use ringbuf;
+use log::debug;
 use thiserror::Error;
+
+// a simple ringbuffer implementation; unsafe for multithread usage
+#[derive(Debug)]
+struct KnowledgeRingBuffer {
+    internal_storage: Vec<Option<KnowledgeItem>>,
+    head: usize,
+    tail: usize,
+}
+
+impl KnowledgeRingBuffer {
+    pub fn new(capacity: usize) -> Self {
+        let internal_storage = (0..capacity).map(|_| None).collect();
+        Self {
+            internal_storage,
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    pub fn push(&mut self, ki: KnowledgeItem) {
+        self.internal_storage[self.tail] = Some(ki);
+        self.tail = (self.tail + 1) % self.internal_storage.capacity();
+    }
+    
+    pub fn pop(&mut self) -> Option<KnowledgeItem> {
+        if self.head == self.tail {
+            None
+        } else {
+            let ret = self.internal_storage[self.head].clone().expect("ringbuf implementation error");
+            self.internal_storage[self.head] = None;
+            self.head = (self.head + 1) % self.internal_storage.capacity();
+            Some(ret)
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        let mut count = 0;
+        for el in &self.internal_storage {
+            if el.is_some() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn get_storage(&self) -> Vec<KnowledgeItem> {
+        let mut storage_vec = vec![];
+        for el in &self.internal_storage {
+            if let Some(v) = el {
+                storage_vec.push(v.clone())
+            }
+        }
+        storage_vec
+    }
+
+    pub fn get_mut_storage(&mut self) -> Vec<&mut KnowledgeItem> {
+        let mut storage_vec = vec![];
+        for el in &mut self.internal_storage {
+            if let Some(v) = el {
+                storage_vec.push(v)
+            }
+        }
+        storage_vec
+    }
+
+}
 
 /// knowledge errors
 #[derive(Debug, Error)]
@@ -21,15 +87,13 @@ pub enum KnowledgeError {
 /// removes data once it is sent to `degree` peers
 /// also removes oldest data if more than `cache_size` data are stored to make room for new data
 pub struct KnowledgeBase {
-    /// internal structure to hold knowledge items (data): producer
-    rb_prod: ringbuf::Producer<KnowledgeItem>,
-    /// internal structure to hold knowledge items (data): consumer
-    rb_cons: ringbuf::Consumer<KnowledgeItem>,
+    /// ring buf holding knowledge items
+    rb: KnowledgeRingBuffer,
     /// max number of peers to which knowledge must be spread before knowledge item is removed
     degree: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct KnowledgeItem {
     id: u64,
     data_item: Data,
@@ -38,37 +102,43 @@ struct KnowledgeItem {
 
 impl KnowledgeBase {
     pub async fn new(capacity: usize, degree: usize) -> Self {
-        let rb = ringbuf::RingBuffer::<KnowledgeItem>::new(capacity);
-        let (rb_prod, rb_cons) = rb.split();
+        let rb = KnowledgeRingBuffer::new(capacity);
         Self {
-            rb_prod,
-            rb_cons,
+            rb,
             degree,
         }
     }
 
     /// pushes data item to ringbuf if not already contained in ringbuf
     /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > 20
-    pub async fn push_data_item(
+    async fn push_data_item(
         &mut self,
         data_item: Data,
         sent_to: Vec<peer::PeerIdentity>,
     ) -> Result<(), KnowledgeError> {
         // check if item already contained in ring buf
         let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
-        if self.rb_cons.find(|x| x.id == data_hash).is_some() {
+        if self.contains(data_hash).await {
             return Ok(());
         };
 
         let knowledge_item = KnowledgeItem::new(data_item, sent_to).await;
 
-        if self.rb_cons.remaining() == 0 {
+        if self.rb.len() == 0 {
             self.churn_ring_buf().await?;
         }
-        self.rb_prod
-            .push(knowledge_item)
-            .map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
+        self.rb
+            .push(knowledge_item.clone());
         Ok(())
+    }
+
+    async fn contains(&self, data_hash: u64) -> bool {
+        for contained_item in self.rb.get_storage() {
+            if contained_item.id == data_hash {
+                return true
+            }
+        }
+        false
     }
 
     pub async fn update_sent_item_to_peers(
@@ -79,7 +149,7 @@ impl KnowledgeBase {
         let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
         let mut item_updated = false;
 
-        for ki in self.rb_cons.iter_mut() {
+        for ki in self.rb.get_mut_storage() {
             if &ki.id == &data_hash {
                 // update peer sent_to
                 ki.update_sent_to(peers.clone()).await;
@@ -98,7 +168,7 @@ impl KnowledgeBase {
     /// used when a new peer ID is discovered to send cached data items to it
     pub async fn get_peer_unsent_items(&self, peer_id: peer::PeerIdentity) -> Vec<Data> {
         let mut peer_unsent_items = vec![];
-        for item in self.rb_cons.iter() {
+        for item in self.rb.get_storage() {
             if !item.check_sent_to_peer(&peer_id).await {
                 peer_unsent_items.push(item.data_item.clone());
             }
@@ -108,12 +178,11 @@ impl KnowledgeBase {
 
     /// removes any items in ring buf where the peer list is larger than `degree`
     async fn churn_ring_buf(&mut self) -> Result<(), KnowledgeError> {
-        for _ in 0..self.rb_cons.len() {
-            if let Some(el) = self.rb_cons.pop() {
+        for _ in 0..self.rb.len() {
+            if let Some(el) = self.rb.pop() {
                 if !(el.sent_to_len().await >= self.degree) {
-                    self.rb_prod
+                    self.rb
                         .push(el)
-                        .map_err(|ki| KnowledgeError::RingBufPushError { el: ki.data_item })?;
                 }
             }
         }
@@ -155,4 +224,72 @@ impl KnowledgeItem {
         data_item.ttl.hash(&mut hasher);
         hasher.finish()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::communication::p2p::message::Data;
+    use rand::random;
+    use peer::PeerIdentity;
+
+    const TEST_CAPACITY: usize = 5;
+    const TEST_DEGREE: usize = 1;
+
+    fn gen_random_data_item() -> Data {
+        let payload : [u8; 30] = random();
+        Data { ttl: random(), data_type: random(), payload: payload.to_vec() }
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_base() {
+        env_logger::init();
+        let mut kb = KnowledgeBase::new(TEST_CAPACITY, TEST_DEGREE).await;
+
+        let data_1 = gen_random_data_item();
+        let data_2 = gen_random_data_item();
+        let data_3 = gen_random_data_item();
+        let data_items = vec![
+            data_1.clone(),
+            data_2.clone(),
+            data_3.clone(),
+        ];
+
+        for item in data_items.clone() {
+            kb.update_sent_item_to_peers(item, vec![]).await.unwrap();
+        }
+
+        let pid = PeerIdentity::default();
+        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        for item in unsent_items.clone() {
+            assert!(data_items.contains(&item));
+        }
+        assert_eq!(data_items.len(), unsent_items.len());
+
+        for item in data_items.clone() {
+            kb.update_sent_item_to_peers(item, vec![pid]).await.unwrap();
+        }
+        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        assert!(unsent_items.is_empty());
+
+        for _ in 0..(TEST_CAPACITY) {
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).await.unwrap();
+        }
+
+        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        assert_eq!(unsent_items.len(), TEST_CAPACITY);
+        for item in data_items.clone() {
+            assert!(!unsent_items.contains(&item));
+        }
+
+        for _ in 0..TEST_CAPACITY {
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).await.unwrap();
+        }
+
+        let new_unsent_items = kb.get_peer_unsent_items(pid).await;
+        for unsent_item in unsent_items {
+            assert!(!new_unsent_items.contains(&unsent_item));
+        }
+    }
+
 }

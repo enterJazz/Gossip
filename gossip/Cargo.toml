@@ -36,8 +36,6 @@ async-trait = "0.1.56"
 pem = "1"
 # for peer identity display
 base64 = "0.13.0"
-# for internal knowledge base data storage
-ringbuf = "0.2.8"
 
 
 [dev-dependencies]
