@@ -169,7 +169,9 @@ impl Broadcaster {
         view.merge(rumor)
     }
 
-    pub async fn run(mut self) -> Result<(), BroadcasterError> {
+    pub async fn run(self) -> Result<(), BroadcasterError> {
+        let view = self.view;
+
         todo!("bootstrap");
 
         // broadcaster - api channels
@@ -216,21 +218,20 @@ impl Broadcaster {
                 // TODO: stop this loop if server is down
 
                 tokio::select! {
-                    push = push_interval.tick() => {
+                    _ = push_interval.tick() => {
                         // FIXME: @wlad self is captured here
-                        // let snapshot = self.view_snapshot().await;
-                        // let rumor = snapshot.into_rumor();
-                        // p2p_server.push(rumor);
+                        let snapshot = view.read().await.clone();
+                        let rumor = snapshot.into_rumor();
+
+                        p2p_server.push(rumor);
                     }
 
-                    pull = pull_interval.tick() => {
+                    _ = pull_interval.tick() => {
                         p2p_server.pull();
                     }
-
                 }
             }
         });
-
 
         // TODO: send knowledge item when: new peer arrives, new knowledge item arrives -> integrate into main control loop
 
@@ -285,7 +286,7 @@ impl Broadcaster {
                 // - peers sending messages here must have completed the PoW verification process
                 incoming_broadcast_msg = p2p_broadcaster_rx.recv() => {
                     match incoming_broadcast_msg {
-                        Some((msg, peer_addr)) => {
+                        Some((msg, identity)) => {
                             match msg {
                                 // Data messages from p2p module are forwarded here to the Api level for further processing
                                 // Data items will be added to the knowledge base after completing the verification step
@@ -331,7 +332,6 @@ impl Broadcaster {
                                 // Rumors are used to update the peers view of the "world"
                                 // these messages might be received via a Push or Pull (asynchronously after pull request)
                                 p2p::message::envelope::Msg::Rumor(rumor) => {
-                                    // update view asynchronously to prevent halting the receiver future
                                     self.update_view(rumor).await;
                                 }
                                 _ => unreachable!("no further messages should be delivered to the broadcastery")
