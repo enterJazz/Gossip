@@ -236,24 +236,27 @@ impl Broadcaster {
 
         // Main control loop handling interaction between P2P and API submodules
         let mut knowledge_base =
-            knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree())
-                .await;
+            knowledge::KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree());
 
         // control loop
         loop {
             tokio::select! {
                 incoming_api_msg = api_broadcaster_rx.recv() => {
                     match incoming_api_msg {
-                        Some(Ok(api::message::ApiMessage::Announce(msg))) => {
+                       // in case of an incoming gossip announce:
+                       // attempt to broadcast to available peers
+                       // save item and peers broadcasted to in knowledge base
+                       Some(Ok(api::message::ApiMessage::Announce(msg))) => {
                             let data = p2p_msg_from_api(msg);
                             let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
                                 error!("failed to broadcast msg to peers: {}", e);
                                 vec![]
                             });
                             knowledge_base.update_sent_item_to_peers(data, reached_peers)
-                                .await
                                 .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                         },
+                        // in case of incoming RPSPeer message:
+                        // TODO: @wlad
                         Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
                             // TODO: add host key parameter
                             // TODO: parse PortMapRecord to get correct port for P2P peer
@@ -322,7 +325,6 @@ impl Broadcaster {
                                         vec![]
                                     });
                                     knowledge_base.update_sent_item_to_peers(data, reached_peers)
-                                        .await
                                         .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                                     // TODO: add messages for verification tracking
                                 },

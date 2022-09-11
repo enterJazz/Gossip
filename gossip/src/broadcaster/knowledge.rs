@@ -101,7 +101,7 @@ struct KnowledgeItem {
 }
 
 impl KnowledgeBase {
-    pub async fn new(capacity: usize, degree: usize) -> Self {
+    pub fn new(capacity: usize, degree: usize) -> Self {
         let rb = KnowledgeRingBuffer::new(capacity);
         Self {
             rb,
@@ -111,28 +111,28 @@ impl KnowledgeBase {
 
     /// pushes data item to ringbuf if not already contained in ringbuf
     /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > 20
-    async fn push_data_item(
+    fn push_data_item(
         &mut self,
         data_item: Data,
         sent_to: Vec<peer::PeerIdentity>,
     ) -> Result<(), KnowledgeError> {
         // check if item already contained in ring buf
-        let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
-        if self.contains(data_hash).await {
+        let data_hash = KnowledgeItem::gen_data_item_id(&data_item);
+        if self.contains(data_hash) {
             return Ok(());
         };
 
-        let knowledge_item = KnowledgeItem::new(data_item, sent_to).await;
+        let knowledge_item = KnowledgeItem::new(data_item, sent_to);
 
         if self.rb.len() == 0 {
-            self.churn_ring_buf().await?;
+            self.churn_ring_buf()?;
         }
         self.rb
             .push(knowledge_item.clone());
         Ok(())
     }
 
-    async fn contains(&self, data_hash: u64) -> bool {
+    fn contains(&self, data_hash: u64) -> bool {
         for contained_item in self.rb.get_storage() {
             if contained_item.id == data_hash {
                 return true
@@ -141,35 +141,35 @@ impl KnowledgeBase {
         false
     }
 
-    pub async fn update_sent_item_to_peers(
+    pub fn update_sent_item_to_peers(
         &mut self,
         data_item: Data,
         peers: Vec<peer::PeerIdentity>,
     ) -> Result<(), KnowledgeError> {
-        let data_hash = KnowledgeItem::gen_data_item_id(&data_item).await;
+        let data_hash = KnowledgeItem::gen_data_item_id(&data_item);
         let mut item_updated = false;
 
         for ki in self.rb.get_mut_storage() {
             if &ki.id == &data_hash {
                 // update peer sent_to
-                ki.update_sent_to(peers.clone()).await;
+                ki.update_sent_to(peers.clone());
                 item_updated = true;
             }
         }
 
         // no corresponding item exists in ringbuf; insert into ringbuf
         if !item_updated {
-            self.push_data_item(data_item, peers).await?;
+            self.push_data_item(data_item, peers)?;
         }
         Ok(())
     }
 
     /// returns all data items of knowledge items which were not sent to a given peer
     /// used when a new peer ID is discovered to send cached data items to it
-    pub async fn get_peer_unsent_items(&self, peer_id: peer::PeerIdentity) -> Vec<Data> {
+    pub fn get_peer_unsent_items(&self, peer_id: peer::PeerIdentity) -> Vec<Data> {
         let mut peer_unsent_items = vec![];
         for item in self.rb.get_storage() {
-            if !item.check_sent_to_peer(&peer_id).await {
+            if !item.check_sent_to_peer(&peer_id) {
                 peer_unsent_items.push(item.data_item.clone());
             }
         }
@@ -177,10 +177,10 @@ impl KnowledgeBase {
     }
 
     /// removes any items in ring buf where the peer list is larger than `degree`
-    async fn churn_ring_buf(&mut self) -> Result<(), KnowledgeError> {
+    fn churn_ring_buf(&mut self) -> Result<(), KnowledgeError> {
         for _ in 0..self.rb.len() {
             if let Some(el) = self.rb.pop() {
-                if !(el.sent_to_len().await >= self.degree) {
+                if !(el.sent_to_len() >= self.degree) {
                     self.rb
                         .push(el)
                 }
@@ -191,8 +191,8 @@ impl KnowledgeBase {
 }
 
 impl KnowledgeItem {
-    async fn new(data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Self {
-        let id = KnowledgeItem::gen_data_item_id(&data_item).await;
+    fn new(data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Self {
+        let id = KnowledgeItem::gen_data_item_id(&data_item);
         Self {
             id,
             data_item,
@@ -200,7 +200,7 @@ impl KnowledgeItem {
         }
     }
 
-    async fn update_sent_to(&mut self, new_sent_to: Vec<peer::PeerIdentity>) {
+    fn update_sent_to(&mut self, new_sent_to: Vec<peer::PeerIdentity>) {
         for new_el in new_sent_to {
             if !self.sent_to.contains(&new_el) {
                 self.sent_to.push(new_el)
@@ -208,16 +208,16 @@ impl KnowledgeItem {
         }
     }
 
-    async fn sent_to_len(&self) -> usize {
+    fn sent_to_len(&self) -> usize {
         return self.sent_to.len();
     }
 
     /// check if the knowledge item was sent to a given peer
-    async fn check_sent_to_peer(&self, peer_id: &peer::PeerIdentity) -> bool {
+    fn check_sent_to_peer(&self, peer_id: &peer::PeerIdentity) -> bool {
         self.sent_to.contains(peer_id)
     }
 
-    async fn gen_data_item_id(data_item: &Data) -> u64 {
+    fn gen_data_item_id(data_item: &Data) -> u64 {
         let mut hasher = DefaultHasher::new();
         data_item.data_type.hash(&mut hasher);
         data_item.payload.hash(&mut hasher);
@@ -241,10 +241,9 @@ mod tests {
         Data { ttl: random(), data_type: random(), payload: payload.to_vec() }
     }
 
-    #[tokio::test]
-    async fn test_knowledge_base() {
+    fn test_knowledge_base() {
         env_logger::init();
-        let mut kb = KnowledgeBase::new(TEST_CAPACITY, TEST_DEGREE).await;
+        let mut kb = KnowledgeBase::new(TEST_CAPACITY, TEST_DEGREE);
 
         let data_1 = gen_random_data_item();
         let data_2 = gen_random_data_item();
@@ -256,37 +255,37 @@ mod tests {
         ];
 
         for item in data_items.clone() {
-            kb.update_sent_item_to_peers(item, vec![]).await.unwrap();
+            kb.update_sent_item_to_peers(item, vec![]).unwrap();
         }
 
         let pid = PeerIdentity::default();
-        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        let unsent_items = kb.get_peer_unsent_items(pid);
         for item in unsent_items.clone() {
             assert!(data_items.contains(&item));
         }
         assert_eq!(data_items.len(), unsent_items.len());
 
         for item in data_items.clone() {
-            kb.update_sent_item_to_peers(item, vec![pid]).await.unwrap();
+            kb.update_sent_item_to_peers(item, vec![pid]).unwrap();
         }
-        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        let unsent_items = kb.get_peer_unsent_items(pid);
         assert!(unsent_items.is_empty());
 
         for _ in 0..(TEST_CAPACITY) {
-            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).await.unwrap();
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).unwrap();
         }
 
-        let unsent_items = kb.get_peer_unsent_items(pid).await;
+        let unsent_items = kb.get_peer_unsent_items(pid);
         assert_eq!(unsent_items.len(), TEST_CAPACITY);
         for item in data_items.clone() {
             assert!(!unsent_items.contains(&item));
         }
 
         for _ in 0..TEST_CAPACITY {
-            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).await.unwrap();
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).unwrap();
         }
 
-        let new_unsent_items = kb.get_peer_unsent_items(pid).await;
+        let new_unsent_items = kb.get_peer_unsent_items(pid);
         for unsent_item in unsent_items {
             assert!(!new_unsent_items.contains(&unsent_item));
         }
