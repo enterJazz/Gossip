@@ -16,6 +16,9 @@ use tokio::sync::mpsc;
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+/// time to wait in secs before polling RPS server for availability
+const RPS_SERVER_WAIT: u64 = 1;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("no subscribers for topic {topic}")]
@@ -102,7 +105,21 @@ pub async fn run(
     let (api_rps_tx, api_rps_rx) = mpsc::channel(512);
 
     // connect to the RPS
-    let rps_conn = Connection::new(TcpStream::connect(rps_address).await.unwrap());
+    // block until RPS is found
+    let rps_conn: Connection;
+    loop {
+        rps_conn = match TcpStream::connect(rps_address).await {
+            Ok(sock) => {
+                Connection::new(sock)
+            },
+            Err(e) => {
+                error!("API SERVER: failed to connect to RPS server: {} waiting and trying again...", e.to_string());
+                std::thread::sleep(std::time::Duration::from_secs(RPS_SERVER_WAIT));
+                continue
+            },
+        };
+        break
+    }
     let mut rps_handler = Handler {
         db: db.clone(),
         connection: rps_conn,

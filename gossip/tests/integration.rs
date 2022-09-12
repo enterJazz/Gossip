@@ -25,9 +25,9 @@ mod api {
 
         setup_gossip().await;
 
-        common::api::gossip::client_notify_to_bootstrapper_peer().await;
-        std::thread::sleep(Duration::from_secs(2));
+        // common::api::gossip::client_notify_to_bootstrapper_peer().await;
         common::api::gossip::client_announce_to_bootstrapper_peer().await;
+        std::thread::sleep(Duration::from_secs(1));
         std::thread::sleep(Duration::from_secs(3));
     }
 }

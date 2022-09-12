@@ -1,7 +1,8 @@
 
 Todo:
   ☐ Integrate feedback form SECK
-  ☐ Add integration tests
+  Add integration tests
+  ☐ build RPSQuery functionality; p2p should be able to sample random peer via API (send RPSQuery)
 
 Integration Tests:
   ☐ Find Host Key Format

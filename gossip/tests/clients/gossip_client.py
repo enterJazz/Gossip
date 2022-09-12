@@ -131,18 +131,16 @@ def main():
 
         # Send notify request, to register a valid message type
         send_gossip_notify(s)
-        sleep(3)
+        print("[+] Finished sending notify; sending announce...")
+        sleep(2)
         # input("Press anykey to send gossip_announce message...")
         send_gossip_announce(s)
     else:
         send_gossip_notify(s)
 
         while(True):
-            try:
-                print("[+] Waiting for GOSSIP_NOTIFICATION message...")
-                mid = wait_notification(s)
-            except KeyboardInterrupt:
-                break
+            print("[+] Waiting for GOSSIP_NOTIFICATION message...")
+            mid = wait_notification(s)
 
             send_gossip_validation(s, mid, valid=True)
 

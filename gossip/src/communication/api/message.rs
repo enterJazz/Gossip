@@ -18,6 +18,8 @@ use super::payload::{
 
 /// total length of header in bytes
 const HEADER_LEN: u16 = 4;
+/// length of message type in bytes
+const MESSAGE_TYPE_LEN: u16 = 2;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -98,7 +100,8 @@ impl ApiMessage {
 
     /// Checks if an entire message can be decoded from `src`
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), Error> {
-        let size = get_u16(src)?;
+        let total_size = get_u16(src)?;
+        let size = total_size - MESSAGE_TYPE_LEN;
         skip(src, size as usize)?;
         Ok(())
     }
@@ -125,8 +128,6 @@ impl ApiMessage {
 
 impl Header {
     pub fn new(payload: &ApiMessage) -> Result<Header, Error> {
-        // size is always payload + header without size (2)
-        let header_len = 2;
         let size: u16 = payload.get_size()?;
         // only Notification is sent by Gossip to other modules
         // so no other headers should be created
