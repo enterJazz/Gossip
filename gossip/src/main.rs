@@ -41,7 +41,7 @@ async fn main() {
                 record.args(),
             )
         })
-        .filter(None, LevelFilter::Info);
+        .filter(None, LevelFilter::Debug);
     
     if args.log_to_stdout {
         builder.target(env_logger::Target::Stdout);

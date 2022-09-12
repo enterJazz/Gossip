@@ -4,6 +4,11 @@ Todo:
   Add integration tests
   ☐ build RPSQuery functionality; p2p should be able to sample random peer via API (send RPSQuery)
 
+API:
+  ☐ spread announce messages within peer (API) 
+  ☐ be able to reconnect if rps server dies
+
+
 Integration Tests:
   ☐ Find Host Key Format
   ☐ Replace host key paths in loaded config 

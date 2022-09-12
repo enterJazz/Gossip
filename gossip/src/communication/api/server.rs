@@ -278,9 +278,15 @@ impl Listener {
                         }
                     };
                     match &message {
-                        ApiMessage::Announce(_) | ApiMessage::Validation(_) => {
+                        // validation messages: return to publisher
+                        ApiMessage::Validation(_) => {
                             api_pub_tx.send(Ok(message)).await.unwrap();
-                        }
+                        },
+                        // announce messages: send to broadcaster
+                        ApiMessage::Announce(_) => {
+                            api_broadcaster_tx.send(Ok(message)).await.unwrap();
+                        },
+
                         _ => panic!("message {:?} not meant to be handled by API", message),
                     }
                 }

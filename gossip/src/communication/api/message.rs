@@ -128,7 +128,7 @@ impl ApiMessage {
 
 impl Header {
     pub fn new(payload: &ApiMessage) -> Result<Header, Error> {
-        let size: u16 = payload.get_size()?;
+        let size: u16 = HEADER_LEN + payload.get_size()?;
         // only Notification is sent by Gossip to other modules
         // so no other headers should be created
         let message_type = match payload {

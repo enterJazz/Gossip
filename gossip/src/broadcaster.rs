@@ -145,6 +145,13 @@ impl Broadcaster {
                        // attempt to broadcast to available peers
                        // save item and peers broadcasted to in knowledge base
                        Some(Ok(api::message::ApiMessage::Announce(msg))) => {
+                            // publish within peer again
+                            publisher.publish(
+                                    crate::common::Data { data_type: msg.clone().data_type, data: msg.clone().data
+                                })
+                                .await
+                                .unwrap_or_else(|e| {error!("failed to publish announce within node: {}", e.to_string())});
+                                
                             let data = p2p_msg_from_api(msg);
                             let reached_peers = p2p_server.broadcast(data.clone(), Vec::new()).await.unwrap_or_else(|e| {
                                 error!("failed to broadcast msg to peers: {}", e);
