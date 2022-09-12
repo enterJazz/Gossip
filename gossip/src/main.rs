@@ -2,7 +2,7 @@ mod communication;
 use chrono::Local;
 use clap::Parser;
 use env_logger::Builder;
-use gossip::broadcaster::broadcaster::Broadcaster;
+use gossip::broadcaster::Broadcaster;
 use gossip::config;
 use log::{info, LevelFilter};
 use std::io::Write;

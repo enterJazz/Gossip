@@ -1,18 +1,15 @@
+mod knowledge;
+mod view;
+
 use core::panic;
-use log::{debug, error, info, log_enabled, warn, Level};
-use std::{
-    collections::{HashMap, HashSet},
-    convert::TryInto,
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use log::{debug, error, info, warn};
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 
 use tokio::{
     io,
     net::TcpListener,
-    sync::{mpsc, Mutex, RwLock},
+    sync::{mpsc, RwLock},
     time::interval,
 };
 
