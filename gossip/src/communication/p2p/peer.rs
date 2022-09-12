@@ -289,10 +289,13 @@ impl Peer {
             Err(err) => return Err(err),
         };
 
-        debug!("completed 1 of 2");
+        debug!("pow: completed 1 of 2");
 
         match self.request_pow(host_identity, host_pub_key).await {
-            Ok(_) => Ok(peer_identity),
+            Ok(_) => {
+                debug!("pow: completed 2 of 2");
+                Ok(peer_identity)
+            }
             Err(err) => Err(err),
         }
     }
@@ -316,9 +319,18 @@ impl Peer {
             }
             Err(err) => return Err(err),
         };
+        debug!("pow: completed 1 of 2");
 
-        self.solve_pow(host_identity, self.connection_port, &host_pub_key)
+        match self
+            .solve_pow(host_identity, self.connection_port, &host_pub_key)
             .await
+        {
+            Ok(peer_identity) => {
+                debug!("pow: completed 2 of 2");
+                Ok(peer_identity)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Read incoming Pow Challenge request and solve it
