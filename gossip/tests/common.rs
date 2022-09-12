@@ -271,7 +271,7 @@ pub mod common_gossip {
     use std::time::Duration;
 
     use super::*;
-    use gossip::{broadcaster};
+    use gossip::broadcaster;
 
     /// to start gossip: we start the bootstrapper node. This node needs an RPS instance to connect to, which we start beforehand.
     pub async fn start_gossip_bootstrapper() {
@@ -281,7 +281,7 @@ pub mod common_gossip {
         let thread_config = config.clone();
 
         tokio::spawn(async move {
-            let gossip = broadcaster::broadcaster::Broadcaster::new(thread_config).await;
+            let gossip = broadcaster::Broadcaster::new(thread_config).await;
             gossip.run().await.unwrap();
         });
 
