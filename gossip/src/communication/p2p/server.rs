@@ -1,4 +1,4 @@
-use crate::communication::p2p::peer::peer_into_str;
+use crate::communication::p2p::peer::{parse_identity, peer_into_str};
 use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
 use log::{debug, error, info, warn};
 use rand::seq::IteratorRandom;
@@ -15,8 +15,8 @@ use super::message;
 use super::peer::{into_addr, PeerConnectionStatus, PeerIdentity};
 
 // message type used by messages originating from server
-type ServerPeerMessage = (message::envelope::Msg, PeerIdentity, SocketAddr);
-type PeerConnectionMessage = (PeerIdentity, PeerConnectionStatus, message::Peer);
+pub type ServerPeerMessage = (message::envelope::Msg, PeerIdentity, SocketAddr);
+pub type PeerConnectionMessage = (PeerIdentity, PeerConnectionStatus, message::Peer);
 
 type PeerReceiver = mpsc::Receiver<message::envelope::Msg>;
 type PeerSender = mpsc::Sender<message::envelope::Msg>;
@@ -56,14 +56,8 @@ pub struct Server {
     host_identity: PeerIdentity,
     host_pub_key: bytes::Bytes,
 
-    p2p_peer_tx: mpsc::Sender<ServerPeerMessage>,
-    p2p_peer_rx: mpsc::Receiver<ServerPeerMessage>,
-
     peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
     peer_p2p_rx: Arc<Mutex<mpsc::Receiver<ServerPeerMessage>>>,
-
-    broadcast_sender: broadcast::Sender<message::envelope::Msg>,
-    broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
 
     peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
     peer_connection_rx: Arc<Mutex<mpsc::Receiver<PeerConnectionMessage>>>,
@@ -89,7 +83,6 @@ impl PeerHandler {
         peer: Peer,
         peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
         peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
-        mut broadcast_receiver: PeerBroadcastReceiver,
     ) -> PeerHandler {
         let (rx_write, mut rx_read) = mpsc::channel(512);
         let (tx_write, tx_read) = mpsc::channel(512);
@@ -129,23 +122,6 @@ impl PeerHandler {
                                 }
                             }
                             None => warn!("got empty message from peer channel")
-                        }
-                    }
-
-                    // broadcast message to peer
-                    broadcast_msg = broadcast_receiver.recv() => {
-                        match broadcast_msg {
-                            Ok(msg) => match tx_clone.send(msg).await {
-                                Ok(()) => debug!("message send"),
-                                Err(e) => {
-                                    error!("failed to broadcast {}", e);
-                                    todo!();
-                                },
-                            },
-                            Err(e) => {
-                                error!("failed to broadcast {}", e);
-                                todo!();
-                            }
                         }
                     }
 
@@ -190,7 +166,6 @@ async fn accept_connection(
     host_identity: PeerIdentity,
     host_pub_key: bytes::Bytes,
     peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
-    broadcast_receiver: broadcast::Receiver<message::envelope::Msg>,
     peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
 ) {
     let mut state = state_ref.lock().await;
@@ -219,12 +194,7 @@ async fn accept_connection(
                     addr,
                     peer_into_str(peer.identity)
                 );
-                let handler = PeerHandler::new(
-                    peer,
-                    peer_p2p_tx,
-                    peer_connection_tx.clone(),
-                    broadcast_receiver,
-                );
+                let handler = PeerHandler::new(peer, peer_p2p_tx, peer_connection_tx.clone());
                 // store peer state
                 state.active_peers.insert(identity, handler);
 
@@ -277,9 +247,7 @@ impl Server {
         let listener = TcpListener::bind(addr).await.unwrap();
 
         // create channels for peer orchestration and handling
-        let (p2p_peer_tx, p2p_peer_rx) = mpsc::channel(512);
         let (peer_p2p_tx, peer_p2p_rx) = mpsc::channel(512);
-        let (broadcast_sender, broadcast_receiver) = broadcast::channel(512);
 
         // channel for handling peer removal
         let (peer_connection_tx, peer_connection_rx) = mpsc::channel(512);
@@ -300,13 +268,6 @@ impl Server {
             host_pub_key: host_pub_key,
             host_identity: identity,
 
-            broadcast_receiver,
-            broadcast_sender,
-
-            // channels for sending messages to a specific peer
-            p2p_peer_tx,
-            p2p_peer_rx,
-
             // channel for receiving messages from peers
             peer_p2p_tx,
             peer_p2p_rx: Arc::new(Mutex::new(peer_p2p_rx)),
@@ -325,18 +286,6 @@ impl Server {
         // this also ensures only one run can be executed at a time
         let mut peer_p2p_rx = self.peer_p2p_rx.lock().await;
         let mut peer_connection_rx = self.peer_connection_rx.lock().await;
-
-        // handle peer addition and removal
-        // tokio::spawn(async move {
-        //     loop {
-        //         tokio::select! {
-        //             // handle peer removals in case of errors
-        //             // does not include challenge errors (invalid peers will not be added to active pool)
-        //             // TODO: remove peer from active pool
-
-        //         }
-        //     }
-        // });
 
         // handle peer message passing
         loop {
@@ -358,7 +307,6 @@ impl Server {
                         self.host_identity,
                         self.host_pub_key.clone(),
                         self.peer_p2p_tx.clone(),
-                        self.broadcast_sender.subscribe(),
                         self.peer_connection_tx.clone(),
                     ).await;
                 }
@@ -420,6 +368,8 @@ impl Server {
             Ok(peer) => peer,
         };
 
+        // TODO: @wlad check for duplicate connections here
+
         let identity = match peer
             .connect(
                 self.host_identity.clone(),
@@ -452,7 +402,7 @@ impl Server {
             .send((identity, PeerConnectionStatus::Connected, peer_description))
             .await;
 
-        Ok({})
+        Ok(())
     }
 
     async fn add_connection(&self, identity: PeerIdentity, peer: Peer) {
@@ -463,7 +413,6 @@ impl Server {
             peer,
             self.peer_p2p_tx.clone(),
             self.peer_connection_tx.clone(),
-            self.broadcast_sender.subscribe(),
         );
         // store peer state
         state.active_peers.insert(identity, handler);
@@ -499,18 +448,34 @@ impl Server {
     pub async fn broadcast(
         &self,
         data: message::Data,
+        exclude_addrs: Vec<PeerIdentity>,
     ) -> Result<Vec<PeerIdentity>, tokio::sync::broadcast::error::SendError<message::envelope::Msg>>
     {
-        match self
-            .broadcast_sender
-            .send(message::envelope::Msg::Data(data))
-        {
-            Ok(_) => debug!("broadcast send to the channel"),
-            Err(err) => todo!("handle broadcast error {}", err),
+        // get a list of peers excluding peers listed in exclude_addrs
+        let connected_peers = self.get_peer_list(None).await;
+        let peers = connected_peers.iter().filter(|p| {
+            match exclude_addrs
+                .iter()
+                .find(|&&exclude_peer| exclude_peer.to_vec() == p.identity)
+            {
+                Some(_) => false,
+                None => true,
+            }
+        });
+
+        let msg = message::envelope::Msg::Data(data);
+
+        let mut send_to: Vec<PeerIdentity> = Vec::new();
+
+        for peer in peers {
+            let identity: PeerIdentity = parse_identity(&peer.identity).unwrap();
+            match self.send_to_peer(identity, msg.clone()).await {
+                Ok(_) => send_to.push(identity),
+                Err(_) => (),
+            };
         }
-        info!("broadcast sending...");
-        // TODO: @wlad refactor to return IDs of peers to which the broadcast was send to
-        Ok(vec![])
+
+        Ok(send_to)
     }
 
     // select a random peer using

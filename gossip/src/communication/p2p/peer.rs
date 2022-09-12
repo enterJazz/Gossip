@@ -94,6 +94,8 @@ pub enum ChallengeError {
 
 #[derive(Error, Debug)]
 pub enum PeerError {
+    #[error("peer error: peer connection already exists")]
+    Duplicate,
     #[error("peer error: connection failed {0}")]
     Connection(#[from] io::Error),
     #[error("peer error: challenge failed {0}")]
@@ -331,7 +333,7 @@ impl Peer {
         let challenge_timeout = Duration::from_secs(20);
 
         let challenge = pow::generate_challenge().await;
-        let difficulty: u8 = 2;
+        let difficulty: u8 = 1;
 
         let challenge_req = envelope::Msg::VerificationRequest(VerificationRequest {
             challenge: challenge.to_vec(),

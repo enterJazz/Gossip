@@ -200,12 +200,12 @@ impl Broadcaster {
                        // save item and peers broadcasted to in knowledge base
                        Some(Ok(api::message::ApiMessage::Announce(msg))) => {
                             let data = p2p_msg_from_api(msg);
-                            let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
+                            let reached_peers = p2p_server.broadcast(data.clone(), Vec::new()).await.unwrap_or_else(|e| {
                                 error!("failed to broadcast msg to peers: {}", e);
                                 vec![]
                             });
-                            // knowledge_base.update_sent_item_to_peers(data, reached_peers)
-                            //     .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
+                            knowledge_base.update_sent_item_to_peers(data, reached_peers)
+                                 .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                         },
                         // in case of incoming RPSPeer message:
                         // TODO: @wlad
@@ -214,6 +214,9 @@ impl Broadcaster {
                             // TODO: parse PortMapRecord to get correct port for P2P peer
                             // try connecting to new peer
                             // TODO: @wlad do we need any extra handling here if rps peer connect fails
+                            let mut p2p_addr = peer.address.clone();
+                            // p2p_addr = peer.
+
                             if let Err(e) = p2p_server.connect(peer.address).await {
                                 error!("failed to connect to RPS-supplied peer: {}", e);
                                 continue
@@ -244,8 +247,8 @@ impl Broadcaster {
                                 // within the P2P module
                                 p2p::message::envelope::Msg::Data(mut data) => {
                                     // check if ttl is 0; if yes, drop
-                                    // @wlad: is this correct ttl handling?
-                                    if data.ttl == 0 {
+                                    // TODO: @wlad: is this correct ttl handling?
+                                    if data.ttl == 1 {
                                         info!("dropping incoming broadcast message as ttl is 0");
                                         continue
                                     } else {
