@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use thiserror::Error;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-/// time to wait in secs before polling RPS server for availability
-const RPS_SERVER_WAIT: u64 = 1;
+/// time to wait in secs before polling server for availability
+const RECONNECT_WAIT: u64 = 1;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -73,6 +73,12 @@ struct Handler {
     /// the byte level protocol parsing details encapsulated in `Connection`.
     connection: Connection,
 
+    /// The original connection address; used for reconnecting
+    conn_addr: SocketAddr,
+
+    /// If set, the handler attempts to reconnect after a closed connection
+    attempt_reconnect: bool,
+
     /// Sender for API interaction.
     /// API fetches txs per topic to send notifications.
     api_handler_tx: mpsc::Sender<ApiMessage>,
@@ -114,7 +120,7 @@ pub async fn run(
             },
             Err(e) => {
                 error!("API SERVER: failed to connect to RPS server: {} waiting and trying again...", e.to_string());
-                std::thread::sleep(std::time::Duration::from_secs(RPS_SERVER_WAIT));
+                std::thread::sleep(std::time::Duration::from_secs(RECONNECT_WAIT));
                 continue
             },
         };
@@ -127,6 +133,8 @@ pub async fn run(
         api_handler_rx: api_rps_rx,
         subscribed_topics: vec![],
         handler_api_tx: rps_api_tx,
+        conn_addr: rps_address.clone(),
+        attempt_reconnect: true,
     };
 
     tokio::spawn(async move {
@@ -179,7 +187,7 @@ impl Listener {
                             continue;
                         }
                     };
-                    info!("API SERVER: received connection from {:?}", addr);
+                    info!("API SERVER: received connection from {:?}", addr.clone());
                     let connection = Connection::new(socket);
 
                     // Create the necessary per-connection handler state.
@@ -194,6 +202,8 @@ impl Listener {
                         api_handler_rx: rx,
                         subscribed_topics: vec![],
                         handler_api_tx: self.handler_api_tx.clone(),
+                        conn_addr: addr,
+                        attempt_reconnect: false,
                     };
 
                     // Spawn a new task to process the connections
@@ -348,8 +358,12 @@ impl Handler {
                         Some(m) => m,
                         None => {
                             info!("API HANDLER: Connection closed gracefully");
-                            self.shutdown();
-                            break
+                            if self.attempt_reconnect {
+                                self.reconnect().await;
+                                continue
+                            } else {
+                                break
+                            }
                         }
                     };
                     // if message is None, connection closed gracefully
@@ -363,6 +377,25 @@ impl Handler {
                 }
             };
         }
+    }
+
+    async fn reconnect(&mut self) {
+        let conn: Connection;
+        info!("API HANDLER: attempting to reconnect to {}", self.conn_addr);
+        loop {
+            conn = match TcpStream::connect(self.conn_addr).await {
+                Ok(sock) => {
+                    Connection::new(sock)
+                },
+                Err(e) => {
+                    error!("API HANDLER: failed to connect to server: {} waiting and trying again...", e.to_string());
+                    std::thread::sleep(std::time::Duration::from_secs(RECONNECT_WAIT));
+                    continue
+                },
+            };
+            break
+        }
+        self.connection = conn;
     }
 
     async fn handle_incoming(&mut self, message: ApiMessage) {
@@ -397,10 +430,6 @@ impl Handler {
     async fn handle_outgoing(&mut self, payload: ApiMessage) {
         debug!("outgoing: {:?}", payload);
         self.connection.write_message(payload).await.unwrap();
-    }
-
-    fn shutdown(&mut self) {
-        self.api_handler_rx.close();
     }
 }
 

@@ -11,4 +11,5 @@ API:
 
 Integration Tests:
   ☐ Find Host Key Format
-  ☐ Replace host key paths in loaded config 
+  Replace host key paths in loaded config 
+  ☐ create total integration test
