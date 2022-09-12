@@ -1,3 +1,6 @@
+//! Represents the RPS Peer message
+//! 
+//! Allows unmarshaling this message
 use crate::communication::api::parse;
 use crate::communication::api::parse::{get_size, get_u16, get_u8, skip, Error};
 use bytes::Bytes;

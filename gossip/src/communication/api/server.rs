@@ -19,8 +19,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 /// time to wait in secs before polling server for availability
 const RECONNECT_WAIT: u64 = 1;
 
+/// Errors thrown by the API server
 #[derive(Error, Debug)]
 pub enum Error {
+    /// Returned if a data type topic has no subscribers; notifies broadcaster
     #[error("no subscribers for topic {topic}")]
     NoSubscribers { topic: u16 },
 }
@@ -95,7 +97,7 @@ struct Handler {
     handler_api_tx: mpsc::Sender<ApiMessage>,
 }
 
-/// Run the server.
+/// Run the API server.
 pub async fn run(
     listener: TcpListener,
     pub_api_rx: mpsc::Receiver<ApiMessage>,
@@ -177,8 +179,11 @@ impl Listener {
     ) {
         info!("API SERVER: accepting inbound connections");
 
+        // server control loop
         loop {
             tokio::select! {
+                // accept and handle new API connections (connections by host modules)
+                // create new handler for each incoming connection
                 res = self.listener.accept() => {
                     let (socket, addr) = match res {
                         Ok(res) => res,
@@ -212,6 +217,8 @@ impl Listener {
                     });
                 }
 
+                // receive and handle messages from the publisher
+                // sends given message to corresponding subscribers
                 message = pub_api_rx.recv() => {
                     info!("API SERVER: received message from publisher");
                     let message = match message {
@@ -278,6 +285,10 @@ impl Listener {
                     }
                 }
 
+                // handle messages from connection handlers
+                // these include host module connections and rps server connection
+                // forwards messages accordingly to publisher (validation messages)
+                // or broadcaster (gossip announce)
                 message = self.handler_api_rx.recv() => {
                     info!("API SERVER: received message from handler");
                      let message = match message {
@@ -296,13 +307,13 @@ impl Listener {
                         ApiMessage::Announce(_) => {
                             api_broadcaster_tx.send(Ok(message)).await.unwrap();
                         },
-
                         _ => panic!("message {:?} not meant to be handled by API", message),
                     }
                 }
 
                 // RPS communication
-                // Broadcaster -> API -> RPS Handler
+                // handle incoming messages from broadcaster
+                // for now, only RPSQuery; Notification messages are spread through the publisher
                 message = broadcaster_api_rx.recv() => {
                     info!("API SERVER: received message from broadcaster");
                     let message = match message {
@@ -318,6 +329,7 @@ impl Listener {
                     }
                 }
                 // RPS Handler -> API -> broadcaster
+                // handle messages from the RPS; forward them to broadcaster for RPS
                 message = self.rps_api_rx.recv() => {
                     info!("API SERVER: received message from RPS handler");
                     let message = match message {
@@ -379,6 +391,7 @@ impl Handler {
         }
     }
 
+    /// reconnect to the previously connected address in case of a premature close
     async fn reconnect(&mut self) {
         let conn: Connection;
         info!("API HANDLER: attempting to reconnect to {}", self.conn_addr);
@@ -398,6 +411,7 @@ impl Handler {
         self.connection = conn;
     }
 
+    /// handle incoming connection messages and forward accordingly
     async fn handle_incoming(&mut self, message: ApiMessage) {
         // If `None` is returned from `read_message()` then the peer closed
         // the socket. There is no further work to do and the task can be
@@ -427,6 +441,7 @@ impl Handler {
         }
     }
 
+    /// handling incoming messages passed to handler onto connection
     async fn handle_outgoing(&mut self, payload: ApiMessage) {
         debug!("outgoing: {:?}", payload);
         self.connection.write_message(payload).await.unwrap();

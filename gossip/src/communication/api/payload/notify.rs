@@ -1,3 +1,6 @@
+//! Represents the notify message
+//! 
+//! Only supports unmarshaling this message
 use crate::communication::api::parse::{get_u16, skip, Error};
 use std::io::Cursor;
 

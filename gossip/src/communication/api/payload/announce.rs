@@ -1,3 +1,6 @@
+//! Represents the announce message
+//! 
+//! Only supports unmarshaling this message
 use crate::communication::api::parse::{get_size, get_u16, get_u8, skip, Error};
 use bytes::Bytes;
 use std::io::Cursor;

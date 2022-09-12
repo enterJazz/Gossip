@@ -1,3 +1,6 @@
+//! Represents the Validation message
+//! 
+//! Only supports unmarshaling this message
 use crate::communication::api::parse::{get_u16, get_u8, skip, Error};
 use std::io::Cursor;
 
