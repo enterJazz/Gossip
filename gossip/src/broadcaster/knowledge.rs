@@ -2,11 +2,9 @@ use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
 };
-
-use crate::communication::p2p::{message::Data, peer};
-
-use log::debug;
 use thiserror::Error;
+
+use crate::communication::p2p::{message::Data, peer, peer::PeerIdentity};
 
 // a simple ringbuffer implementation; unsafe for multithread usage
 #[derive(Debug)]
@@ -30,12 +28,14 @@ impl KnowledgeRingBuffer {
         self.internal_storage[self.tail] = Some(ki);
         self.tail = (self.tail + 1) % self.internal_storage.capacity();
     }
-    
+
     pub fn pop(&mut self) -> Option<KnowledgeItem> {
         if self.head == self.tail {
             None
         } else {
-            let ret = self.internal_storage[self.head].clone().expect("ringbuf implementation error");
+            let ret = self.internal_storage[self.head]
+                .clone()
+                .expect("ringbuf implementation error");
             self.internal_storage[self.head] = None;
             self.head = (self.head + 1) % self.internal_storage.capacity();
             Some(ret)
@@ -71,7 +71,6 @@ impl KnowledgeRingBuffer {
         }
         storage_vec
     }
-
 }
 
 /// knowledge errors
@@ -94,7 +93,7 @@ pub struct KnowledgeBase {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-struct KnowledgeItem {
+pub struct KnowledgeItem {
     id: u64,
     data_item: Data,
     sent_to: Vec<peer::PeerIdentity>,
@@ -103,10 +102,7 @@ struct KnowledgeItem {
 impl KnowledgeBase {
     pub fn new(capacity: usize, degree: usize) -> Self {
         let rb = KnowledgeRingBuffer::new(capacity);
-        Self {
-            rb,
-            degree,
-        }
+        Self { rb, degree }
     }
 
     /// pushes data item to ringbuf if not already contained in ringbuf
@@ -127,15 +123,14 @@ impl KnowledgeBase {
         if self.rb.len() == 0 {
             self.churn_ring_buf()?;
         }
-        self.rb
-            .push(knowledge_item.clone());
+        self.rb.push(knowledge_item.clone());
         Ok(())
     }
 
     fn contains(&self, data_hash: u64) -> bool {
         for contained_item in self.rb.get_storage() {
             if contained_item.id == data_hash {
-                return true
+                return true;
             }
         }
         false
@@ -181,8 +176,7 @@ impl KnowledgeBase {
         for _ in 0..self.rb.len() {
             if let Some(el) = self.rb.pop() {
                 if !(el.sent_to_len() >= self.degree) {
-                    self.rb
-                        .push(el)
+                    self.rb.push(el)
                 }
             }
         }
@@ -230,15 +224,19 @@ impl KnowledgeItem {
 mod tests {
     use super::*;
     use crate::communication::p2p::message::Data;
-    use rand::random;
     use peer::PeerIdentity;
+    use rand::random;
 
     const TEST_CAPACITY: usize = 5;
     const TEST_DEGREE: usize = 1;
 
     fn gen_random_data_item() -> Data {
-        let payload : [u8; 30] = random();
-        Data { ttl: random(), data_type: random(), payload: payload.to_vec() }
+        let payload: [u8; 30] = random();
+        Data {
+            ttl: random(),
+            data_type: random(),
+            payload: payload.to_vec(),
+        }
     }
 
     fn test_knowledge_base() {
@@ -248,11 +246,7 @@ mod tests {
         let data_1 = gen_random_data_item();
         let data_2 = gen_random_data_item();
         let data_3 = gen_random_data_item();
-        let data_items = vec![
-            data_1.clone(),
-            data_2.clone(),
-            data_3.clone(),
-        ];
+        let data_items = vec![data_1.clone(), data_2.clone(), data_3.clone()];
 
         for item in data_items.clone() {
             kb.update_sent_item_to_peers(item, vec![]).unwrap();
@@ -272,7 +266,8 @@ mod tests {
         assert!(unsent_items.is_empty());
 
         for _ in 0..(TEST_CAPACITY) {
-            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).unwrap();
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![])
+                .unwrap();
         }
 
         let unsent_items = kb.get_peer_unsent_items(pid);
@@ -282,7 +277,8 @@ mod tests {
         }
 
         for _ in 0..TEST_CAPACITY {
-            kb.update_sent_item_to_peers(gen_random_data_item(), vec![]).unwrap();
+            kb.update_sent_item_to_peers(gen_random_data_item(), vec![])
+                .unwrap();
         }
 
         let new_unsent_items = kb.get_peer_unsent_items(pid);
@@ -290,5 +286,4 @@ mod tests {
             assert!(!new_unsent_items.contains(&unsent_item));
         }
     }
-
 }

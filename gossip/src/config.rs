@@ -1,7 +1,8 @@
-use ini::Ini;
-use log::error;
-use std::{collections::HashMap, fs, io, net::SocketAddr, path::PathBuf};
+use ini::{Ini, Properties};
+use log::{error, info};
+use std::{collections::HashMap, fs, io, net::SocketAddr, path::PathBuf, str::FromStr};
 use thiserror::Error;
+use tokio::net::ToSocketAddrs;
 use url::Url;
 
 const GOSSIP_SECTION_NAME: &str = "gossip";
@@ -40,7 +41,7 @@ pub struct Config {
 
     cache_size: usize,
     degree: usize,
-    bootstrapper: Url,
+    bootstrapper: Option<String>,
     p2p_address: SocketAddr,
     api_address: SocketAddr,
     rps_address: SocketAddr,
@@ -102,35 +103,21 @@ impl Config {
                     section_name: GOSSIP_SECTION_NAME.to_string(),
                 })?;
 
+        // parse bootstrapping address
+        let mut bootstrapping_addr: Option<String> = None;
+        if let Some(addr) = gossip_section.get(BOOTSTRAPPER_CONFIG_FIELD.clone()) {
+            bootstrapping_addr = Some(addr.to_string())
+        }
+
+        // parse usized values
         let parsed_usize_keys: Vec<String> = vec![
             CACHE_SIZE_CONFIG_FIELD.to_string(),
             DEGREE_CONFIG_FIELD.to_string(),
         ];
+
         let mut parsed_usize_fields: HashMap<String, usize> = HashMap::new();
-
-        let parsed_url_keys: Vec<String> = vec![BOOTSTRAPPER_CONFIG_FIELD.to_string()];
-        let mut parsed_url_fields: HashMap<String, Url> = HashMap::new();
-
-        let parsed_address_keys: Vec<String> = vec![
-            P2P_ADDRESS_CONFIG_FIELD.to_string(),
-            API_ADDRESS_CONFIG_FIELD.to_string(),
-        ];
-        let mut parsed_address_fields: HashMap<String, SocketAddr> = HashMap::new();
-
-        for field_key in [
-            parsed_usize_keys.clone(),
-            parsed_url_keys.clone(),
-            parsed_address_keys.clone(),
-        ]
-        .concat()
-        {
-            let field_value = gossip_section
-                .get(&field_key)
-                .ok_or(ConfigError::FieldMissing {
-                    field_name: field_key.clone(),
-                })?;
-
-            if parsed_usize_keys.contains(&field_key) {
+        for field_key in parsed_usize_keys {
+            if let Some(field_value) = gossip_section.get(&field_key) {
                 let usize_parsed_value: usize =
                     field_value
                         .parse::<usize>()
@@ -139,16 +126,19 @@ impl Config {
                             err_msg: e.to_string(),
                         })?;
                 let _ = parsed_usize_fields.insert(field_key.clone(), usize_parsed_value);
-            } else if parsed_url_keys.contains(&field_key) {
-                let url_parsed_value: Url =
-                    field_value
-                        .parse::<Url>()
-                        .map_err(|e| ConfigError::ParsingError {
-                            field_name: field_key.clone(),
-                            err_msg: e.to_string(),
-                        })?;
-                let _ = parsed_url_fields.insert(field_key.clone(), url_parsed_value);
-            } else if parsed_address_keys.contains(&field_key) {
+            } else {
+                panic!("invalid state: invalid config key");
+            }
+        }
+
+        // parse addresses
+        let parsed_address_keys: Vec<String> = vec![
+            P2P_ADDRESS_CONFIG_FIELD.to_string(),
+            API_ADDRESS_CONFIG_FIELD.to_string(),
+        ];
+        let mut parsed_address_fields: HashMap<String, SocketAddr> = HashMap::new();
+        for field_key in parsed_address_keys {
+            if let Some(field_value) = gossip_section.get(&field_key) {
                 let socketaddr_parsed_value: SocketAddr = field_value
                     .parse::<SocketAddr>()
                     .map_err(|e| ConfigError::ParsingError {
@@ -184,7 +174,7 @@ impl Config {
             host_pub_key_pem: pub_key,
             cache_size: parsed_usize_fields[CACHE_SIZE_CONFIG_FIELD],
             degree: parsed_usize_fields[DEGREE_CONFIG_FIELD],
-            bootstrapper: parsed_url_fields[BOOTSTRAPPER_CONFIG_FIELD].clone(),
+            bootstrapper: bootstrapping_addr,
             p2p_address: parsed_address_fields[P2P_ADDRESS_CONFIG_FIELD],
             api_address: parsed_address_fields[API_ADDRESS_CONFIG_FIELD],
             rps_address,
@@ -207,8 +197,8 @@ impl Config {
         self.degree
     }
 
-    pub fn get_bootstrapper(&self) -> &Url {
-        &self.bootstrapper
+    pub fn get_bootstrapper(&self) -> Option<String> {
+        self.bootstrapper.clone()
     }
 
     pub fn get_p2p_address(&self) -> SocketAddr {
@@ -272,12 +262,8 @@ mod tests {
             generated_config.get_degree()
         );
         assert_eq!(
-            &gossip_conf
-                .get(BOOTSTRAPPER_CONFIG_FIELD)
-                .unwrap()
-                .parse::<Url>()
-                .unwrap(),
-            generated_config.get_bootstrapper()
+            gossip_conf.get(BOOTSTRAPPER_CONFIG_FIELD).unwrap(),
+            generated_config.get_bootstrapper().unwrap()
         );
         assert_eq!(
             gossip_conf

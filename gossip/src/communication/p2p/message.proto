@@ -26,8 +26,9 @@ message VerificationRequest {
 message VerificationResponse {
   bytes challenge = 1;
   bytes remote_identity = 2;
-  bytes pub_key = 3;
-  bytes nonce = 4;
+  uint32 server_port = 3;
+  bytes pub_key = 4;
+  bytes nonce = 5;
 }
 
 enum VerificationResponseStatus {
@@ -46,11 +47,14 @@ message Peer {
 }
 
 message Rumor {
-  uint32 ttl = 1;
-  repeated Peer peers = 2;
+  repeated Peer peers = 1;
+  bytes signature = 2;
 }
 
-message PullRequest { uint32 ttl = 1; }
+message PullRequest {
+  uint64 id = 1;
+  bytes signature = 2;
+}
 
 message Data {
   uint32 ttl = 1;
@@ -67,5 +71,6 @@ message Envelope {
     Data data = 5;
     Rumor rumor = 6;
     PullRequest pull = 7;
+    Rumor pullResponse = 8;
   }
 }

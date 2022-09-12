@@ -1,9 +1,9 @@
 extern crate core;
+pub mod broadcaster;
+pub mod config;
 
-mod broadcaster;
 mod common;
 mod communication;
-pub mod config;
 // mod pow;
 mod publisher;
 mod validator;

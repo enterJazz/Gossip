@@ -7,7 +7,7 @@ use log::{debug, error, info};
 use prost::Message;
 use std::{
     convert::TryInto,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
 };
 use std::{fmt, sync::Arc};
 use std::{io, net::SocketAddr};
@@ -16,18 +16,66 @@ use thiserror::Error;
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufWriter},
-    net::{tcp, TcpStream},
+    net::{tcp, TcpStream, ToSocketAddrs},
     sync::{mpsc, Mutex},
     time::timeout,
 };
 
-use super::message;
+use super::message::{self};
 
 /// Peer identity is a Blake3 hahs of a peers public key
 pub type PeerIdentity = [u8; 32];
 
 pub fn peer_into_str(peer: PeerIdentity) -> String {
     base64::encode(peer)
+}
+pub fn parse_identity(buf: &[u8]) -> Option<PeerIdentity> {
+    match buf.try_into() {
+        Ok(id) => Some(id),
+        Err(err) => None,
+    }
+}
+
+pub fn into_addr(addr: SocketAddr) -> message::Addr {
+    let mut msg_addr = message::Addr {
+        ip: None,
+        port: addr.port() as u32,
+    };
+
+    match addr.ip() {
+        IpAddr::V4(ip) => msg_addr.ip = Some(message::addr::Ip::V4(ip.into())),
+        IpAddr::V6(ip) => msg_addr.ip = Some(message::addr::Ip::V6(ip.octets().to_vec())),
+    }
+
+    msg_addr
+}
+
+pub fn from_addr(addr: &message::Addr) -> Option<SocketAddr> {
+    let port = addr.port.try_into();
+    if let Err(_) = port {
+        return None;
+    }
+
+    match addr.ip.clone() {
+        Some(message::addr::Ip::V4(ip)) => Some(std::net::SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::from(ip),
+            port.unwrap(),
+        ))),
+        Some(message::addr::Ip::V6(ip)) => {
+            let ip_buf: [u8; 16] = match ip.try_into() {
+                Ok(b) => b,
+                Err(_) => return None,
+            };
+
+            Some(std::net::SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(ip_buf),
+                addr.port.try_into().unwrap(),
+                0,
+                0,
+            )))
+        }
+        _ => return None,
+    }
 }
 
 /// Shorthand for the receive half of the message channel.
@@ -118,6 +166,9 @@ pub struct Peer {
     /// Public key of remote peer (only set after completed handshake)
     pub pub_key: bytes::Bytes,
 
+    /// Connection Port used by the Peer server for incoming connections
+    pub connection_port: u16,
+
     /// Remote peer address
     remote_addr: SocketAddr,
     /// Internal buffer for reading incomming messages
@@ -139,9 +190,20 @@ impl Peer {
         Peer::new_with_identity(stream, [0; 32], bytes::Bytes::new())
     }
 
-    pub async fn new_from_addr(addr: SocketAddr) -> PeerResult<Self> {
+    pub async fn new_from_addr<T: ToSocketAddrs>(addr: T) -> PeerResult<Self> {
         match TcpStream::connect(addr).await {
-            Ok(socket) => Ok(Peer::new(socket)),
+            Ok(socket) => {
+                let port = match socket.peer_addr() {
+                    Ok(addr) => addr.port(),
+                    Err(err) => {
+                        unreachable!("connection created without valid peer address {}", err)
+                    }
+                };
+                let mut peer = Peer::new(socket);
+                peer.connection_port = port;
+
+                Ok(peer)
+            }
             Err(e) => Err(PeerError::Connection(e)),
         }
     }
@@ -158,6 +220,7 @@ impl Peer {
             rx: Arc::new(Mutex::new(rx)),
             tx: Arc::new(Mutex::new(tx)),
             remote_addr,
+            connection_port: 0,
             // TODO: handle
             status: PeerConnectionStatus::Unknown,
             read_buffer: BytesMut::with_capacity(8 * 1024),
@@ -176,6 +239,7 @@ impl Peer {
     pub async fn connect(
         &mut self,
         host_identity: PeerIdentity,
+        host_connection_port: u16,
         host_pub_key: bytes::Bytes,
     ) -> PeerResult<PeerIdentity> {
         debug!("reading message from {}", self.remote_addr());
@@ -193,6 +257,10 @@ impl Peer {
             req.challenge,
             peer_into_str(peer_identity)
         );
+
+        // update peer values based on response
+        self.pub_key = bytes::Bytes::from(req.pub_key);
+        self.identity = peer_identity;
 
         // ensure challenge has the correct length as expected by PoW module
         let challenge: [u8; pow::CHALLENGE_LEN] = match req.challenge.as_slice().try_into() {
@@ -220,6 +288,7 @@ impl Peer {
 
         let resp = envelope::Msg::VerificationResponse(message::VerificationResponse {
             challenge: req.challenge,
+            server_port: host_connection_port as u32,
             remote_identity: peer_identity.to_vec(),
             nonce: nonce.to_vec(),
             pub_key: host_pub_key.to_vec(),
@@ -330,7 +399,8 @@ impl Peer {
 
                 // update values on peer
                 self.pub_key = bytes::Bytes::from(resp.pub_key);
-                self.identity = remote_identity
+                self.identity = remote_identity;
+                self.connection_port = resp.server_port as u16;
             }
         } else {
             debug!("challenge response timeout exceeded");
@@ -400,25 +470,19 @@ impl Peer {
     }
 
     pub fn get_peer_addr(&self) -> message::Addr {
-        let addr = self.remote_addr;
+        into_addr(self.remote_addr)
+    }
 
-        let mut msg_addr = message::Addr {
-            ip: None,
-            port: addr.port() as u32,
-        };
-
-        match addr.ip() {
-            IpAddr::V4(ip) => msg_addr.ip = Some(message::addr::Ip::V4(ip.into())),
-            IpAddr::V6(ip) => msg_addr.ip = Some(message::addr::Ip::V6(ip.octets().to_vec())),
-        }
-
-        msg_addr
+    pub fn get_peer_p2p_addr(&self) -> message::Addr {
+        let mut addr = into_addr(self.remote_addr);
+        addr.port = self.connection_port as u32;
+        addr
     }
 
     pub fn get_peer_description(&self) -> message::Peer {
         message::Peer {
             identity: self.identity.to_vec(),
-            address: Some(self.get_peer_addr()),
+            address: Some(self.get_peer_p2p_addr()),
         }
     }
 

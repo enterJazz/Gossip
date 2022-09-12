@@ -2,8 +2,9 @@ mod communication;
 use chrono::Local;
 use clap::Parser;
 use env_logger::Builder;
+use gossip::broadcaster::broadcaster::Broadcaster;
 use gossip::config;
-use log::LevelFilter;
+use log::{info, LevelFilter};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -44,5 +45,12 @@ async fn main() {
         config = config::Config::load_config(config_path).unwrap();
     } else {
         panic!("no config file provided")
+    }
+
+    let b = Broadcaster::new(config).await;
+
+    match b.run().await {
+        Ok(_) => info!("stopping gossip"),
+        Err(err) => panic!("gossip failed {}", err),
     }
 }
