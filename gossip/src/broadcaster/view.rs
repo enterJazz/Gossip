@@ -1,3 +1,7 @@
+//! Represents the peer view of a gossip instance.
+//! 
+//! Also contains utilities for managing the view and its contained peers.
+//! Is used to store active peers for knowledge disemination
 use crate::communication::p2p;
 use log::{debug, info};
 use std::{
