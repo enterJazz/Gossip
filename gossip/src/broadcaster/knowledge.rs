@@ -177,6 +177,9 @@ impl KnowledgeBase {
         false
     }
 
+    /// given a data item and a set of peers it was sent to:
+    /// if data item exists in knowledge base, update the peers the item was sent to with the given peer list
+    /// else if data item does not yet exist, push it along with peer list as a knowledge item to the knowledge base
     pub fn update_sent_item_to_peers(
         &mut self,
         data_item: Data,
@@ -251,6 +254,7 @@ impl Display for KnowledgeBase {
 }
 
 impl KnowledgeItem {
+    /// creates a new knowledge item from a data item and a peer list containing peers it was sent to
     fn new(data_item: Data, sent_to: Vec<peer::PeerIdentity>) -> Self {
         let id = KnowledgeItem::gen_data_item_id(&data_item);
         Self {
@@ -260,6 +264,7 @@ impl KnowledgeItem {
         }
     }
 
+    /// updates the peer list the item was sent to with new peers
     fn update_sent_to(&mut self, new_sent_to: Vec<peer::PeerIdentity>) {
         for new_el in new_sent_to {
             if !self.sent_to.contains(&new_el) {
@@ -268,6 +273,7 @@ impl KnowledgeItem {
         }
     }
 
+    /// returns the number of unique peers the item was sent to
     fn sent_to_len(&self) -> usize {
         return self.sent_to.len();
     }
@@ -277,6 +283,7 @@ impl KnowledgeItem {
         self.sent_to.contains(peer_id)
     }
 
+    /// creates the unique id of a given data item
     fn gen_data_item_id(data_item: &Data) -> u64 {
         let mut hasher = DefaultHasher::new();
         data_item.data_type.hash(&mut hasher);
