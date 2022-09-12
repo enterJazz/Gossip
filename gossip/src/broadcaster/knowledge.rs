@@ -1,3 +1,15 @@
+//! Represents the data item cache of the Gossip module
+//! 
+//! Contains the "Knowledge Base", which is a Ring Buffer of "Knowledge Items" with extra utilities.
+//! Knowledge items contain data items as well as other metadata. These metadata consist of the item's id and the list of peers this item was sent to.
+//! The item's id is a hash of the data item. This hash prevents the gossip module from filling knowledge base with duplicate items, as the knowledge buffer checks for duplicate entries before pushing a new entry.
+//! Further, the list of peers of which the gossip module sent the knowledge item to enables the knowledge base to remove items which have been sent at least `degree` times to other peers. Upon sending the item to a new peer, the gossip module adds an entry to this list.
+//! 
+//! When the gossip module pushes a new knowledge item to the knowledge base, a free space within the knowledge base's internal ring buffer is used up. Upon reaching the config-specified `capacity`, new entries overwrite older entries, ensure that the knowledge base stores the most recently received items.
+//! Before overwriting old items, the knowledge base performs an internal churn on the ring buffer. The knowledge base thereby removes all items which were sent to at least the config-supplied `degree` number of peers, thereby freeing up the capacity for new items.
+//! 
+//! Once a peer connects to the gossip instance, this instance may ask the knowledge base for all items which have not yet been sent to this peer.
+//! Upon successfully having sent a knowledge item to a peer, the sending instance updates the sent knowledge items in the knowledge base with the peer ID this knowledge item was sent to. This information is used for the previously described churn as well as which items are returned to a newly connected peer.
 use std::{
     collections::hash_map::DefaultHasher,
     fmt::{self, Display},
@@ -7,15 +19,19 @@ use thiserror::Error;
 
 use crate::communication::p2p::{message::Data, peer, peer::PeerIdentity};
 
-// a simple ringbuffer implementation; unsafe for multithread usage
+/// a simple ringbuffer implementation which carries knowledge items; unsafe for multithread usage
 #[derive(Debug)]
 struct KnowledgeRingBuffer {
+    /// vec which internally stores the knowledge items
     internal_storage: Vec<Option<KnowledgeItem>>,
+    /// head of the ringbuf
     head: usize,
+    /// tail of the ringbuf
     tail: usize,
 }
 
 impl KnowledgeRingBuffer {
+    /// creates a new ring buf with a given capacity
     pub fn new(capacity: usize) -> Self {
         let internal_storage = (0..capacity).map(|_| None).collect();
         Self {
@@ -25,22 +41,23 @@ impl KnowledgeRingBuffer {
         }
     }
 
+    /// pushes a new item to the ring buf and moves the tail accordingly
     pub fn push(&mut self, ki: KnowledgeItem) {
         self.internal_storage[self.tail] = Some(ki);
         self.tail = (self.tail + 1) % self.internal_storage.capacity();
     }
 
+    /// removes 
     pub fn pop(&mut self) -> Option<KnowledgeItem> {
-        if self.head == self.tail {
-            None
-        } else {
-            let ret = self.internal_storage[self.head]
-                .clone()
-                .expect("ringbuf implementation error");
-            self.internal_storage[self.head] = None;
-            self.head = (self.head + 1) % self.internal_storage.capacity();
-            Some(ret)
-        }
+        match self.internal_storage[self.head]
+                .clone() {
+                    Some(item) => {
+                        self.internal_storage[self.head] = None;
+                        self.head = (self.head + 1) % self.internal_storage.capacity();
+                        Some(item)
+                    },
+                    None => None,
+                }
     }
 
     pub fn len(&self) -> usize {
@@ -123,7 +140,7 @@ impl KnowledgeBase {
     }
 
     /// pushes data item to ringbuf if not already contained in ringbuf
-    /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > 20
+    /// if ring buf is at full capacity, i.e. pushing an el removes an el, we first clean up the ring buf from any els with peers viewed > degree
     fn push_data_item(
         &mut self,
         data_item: Data,
@@ -144,11 +161,13 @@ impl KnowledgeBase {
         Ok(())
     }
 
+    /// checks if the knowledge base knows a given data item (is contained in the ring buf)
     pub fn is_known_item(&self, data_item: &Data) -> bool {
         let data_hash = KnowledgeItem::gen_data_item_id(data_item);
         self.contains(data_hash)
     }
 
+    /// checks explicitly for the hash of the data item in the ring buf
     fn contains(&self, data_hash: u64) -> bool {
         for contained_item in self.rb.get_storage() {
             if contained_item.id == data_hash {
@@ -286,6 +305,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_knowledge_base() {
         env_logger::init();
         let mut kb = KnowledgeBase::new(TEST_CAPACITY, TEST_DEGREE);

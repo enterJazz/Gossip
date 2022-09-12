@@ -1,3 +1,6 @@
+//! Module to manage API server connections
+//! 
+//! Provides utility for reading and writing APIMessages over a TCP connection
 use crate::communication::api::message::{self, ApiMessage};
 
 use bytes::{Buf, BytesMut};
