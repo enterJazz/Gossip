@@ -81,7 +81,11 @@ impl Broadcaster {
         let mut publisher = publisher::Publisher::new(pub_api_tx, api_pub_rx).await;
         let api_listener = match TcpListener::bind(self.config.get_api_address()).await {
             Ok(l) => l,
-            Err(err) => panic!("failed to start publisher {}", err),
+            Err(err) => panic!(
+                "failed to start publisher on {}: {}",
+                self.config.get_api_address(),
+                err
+            ),
         };
         let rps_address = self.config.get_rps_address();
         tokio::spawn(async move {
@@ -99,7 +103,7 @@ impl Broadcaster {
         debug!("starting P2P server");
         let p2p_server = p2p::server::run(
             self.config.get_p2p_address(),
-            self.config.get_host_pub_key(),
+            self.config.get_host_pub_key_der(),
             p2p_broadcaster_tx,
             p2p_broadcaster_connection_tx,
         )
@@ -362,14 +366,14 @@ impl Broadcaster {
                     let rumor = snapshot.into_rumor();
 
                     // push current view to a random peer
-                    match p2p.push(rumor).await {
+                    match p2p.push(None, rumor).await {
                         Ok(_) => debug!("push completed"),
                         Err(err) => error!("push failed {}", err),
                     };
                 }
 
                 _ = pull_interval.tick() => {
-                    match p2p.pull().await {
+                    match p2p.pull(None).await {
                         Ok(_) => debug!("pull completed"),
                         Err(err) => error!("pull failed {}", err),
                     };

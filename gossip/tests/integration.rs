@@ -1,8 +1,13 @@
 mod common;
 
-use std::{path::PathBuf, process::{Command, Output}, thread, net::SocketAddr};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    process::{Command, Output},
+    thread,
+};
 
-use gossip::{config::Config, broadcaster};
+use gossip::{broadcaster, config::Config};
 use ini::Ini;
 use url::Url;
 
@@ -22,7 +27,6 @@ mod api {
 
     #[test(tokio::test(flavor = "multi_thread", worker_threads = 8))]
     async fn test_gossip_api() {
-
         setup_gossip().await;
 
         common::api::gossip::client_notify_to_bootstrapper_peer().await;

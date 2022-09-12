@@ -20,11 +20,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-
     let args = Args::parse();
 
     let mut builder = Builder::new();
-    builder.format(|buf, record| {
+    builder
+        .format(|buf, record| {
             writeln!(
                 buf,
                 "[{} {}] {}:{} - {}",
@@ -42,11 +42,10 @@ async fn main() {
             )
         })
         .filter(None, LevelFilter::Debug);
-    
     if args.log_to_stdout {
         builder.target(env_logger::Target::Stdout);
     }
-    
+
     builder.init();
 
     // TODO: parse config from args

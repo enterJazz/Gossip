@@ -1,9 +1,11 @@
 use ini::{Ini, Properties};
 use log::{error, info};
+use openssl::{
+    pkey::{Private, Public},
+    rsa::{self, Rsa},
+};
 use std::{collections::HashMap, fs, io, net::SocketAddr, path::PathBuf, str::FromStr};
 use thiserror::Error;
-use tokio::net::ToSocketAddrs;
-use url::Url;
 
 const GOSSIP_SECTION_NAME: &str = "gossip";
 const RPS_SECTION_NAME: &str = "rps";
@@ -29,16 +31,16 @@ pub enum ConfigError {
     ParsingError { field_name: String, err_msg: String },
     #[error("Failed to parse pem file: {0}")]
     PemParseError(#[from] pem::PemError),
-    #[error("Failed to open pem file: {0}")]
-    PemOpenError(#[from] io::Error),
+    #[error("Failed to process RSA key")]
+    RsaKeyError,
 }
 
 /// Configuration loaded from ini file
 #[derive(Debug, Clone)]
 pub struct Config {
     host_key_path: PathBuf,
-    host_priv_key_pem: pem::Pem,
-    host_pub_key_pem: pem::Pem,
+    host_priv_key: Rsa<Private>,
+    host_pub_key: Rsa<Public>,
 
     cache_size: usize,
     degree: usize,
@@ -46,24 +48,6 @@ pub struct Config {
     p2p_address: SocketAddr,
     api_address: SocketAddr,
     rps_address: SocketAddr,
-}
-
-/// Opens and parses a pem file at location path
-fn parse_pem(path: PathBuf) -> Result<pem::Pem, ConfigError> {
-    let file = match fs::read_to_string(path.clone()) {
-        Ok(f) => f,
-        Err(err) => {
-            println!(
-                "failed to read pem at: {:?}",
-                path.into_os_string().into_string()
-            );
-            return Err(ConfigError::PemOpenError(err));
-        }
-    };
-    match pem::parse(file) {
-        Ok(p) => Ok(p),
-        Err(err) => Err(ConfigError::PemParseError(err)),
-    }
 }
 
 impl Config {
@@ -86,16 +70,22 @@ impl Config {
                 err_msg: e.to_string(),
             })?;
 
+        println!("key at {}", host_key_path.display());
         let mut host_pub_key_path = host_key_path.clone();
         host_pub_key_path.set_extension("pub");
-        let pub_key = match parse_pem(host_pub_key_path) {
-            Ok(key) => key,
-            Err(err) => return Err(err),
+        let pub_key = match fs::read(host_pub_key_path) {
+            Ok(key) => {
+                rsa::Rsa::public_key_from_pem(&key).expect("failed to parse host public key")
+            }
+            Err(err) => panic!("failed to read host public key: {}", err),
         };
 
-        let priv_key = match parse_pem(host_key_path.clone()) {
-            Ok(key) => key,
-            Err(err) => return Err(err),
+        println!("key at {}", host_key_path.display());
+        let priv_key = match fs::read(host_key_path.clone()) {
+            Ok(key) => {
+                rsa::Rsa::private_key_from_pem(&key).expect("failed to parse host private key")
+            }
+            Err(err) => panic!("failed to read host private key: {}", err),
         };
 
         let gossip_section =
@@ -171,8 +161,8 @@ impl Config {
 
         Ok(Self {
             host_key_path,
-            host_priv_key_pem: priv_key,
-            host_pub_key_pem: pub_key,
+            host_priv_key: priv_key,
+            host_pub_key: pub_key,
             cache_size: parsed_usize_fields[CACHE_SIZE_CONFIG_FIELD],
             degree: parsed_usize_fields[DEGREE_CONFIG_FIELD],
             bootstrapper: bootstrapping_addr,
@@ -186,8 +176,16 @@ impl Config {
         &self.host_key_path
     }
 
-    pub fn get_host_pub_key(&self) -> bytes::Bytes {
-        bytes::Bytes::from(self.host_pub_key_pem.contents.clone())
+    pub fn get_host_pub_key(&self) -> openssl::rsa::Rsa<Public> {
+        self.host_pub_key.clone()
+    }
+
+    pub fn get_host_pub_key_der(&self) -> bytes::Bytes {
+        bytes::Bytes::from(
+            self.host_pub_key
+                .public_key_to_der()
+                .expect("failed to encode public key to pem"),
+        )
     }
 
     pub fn get_cache_size(&self) -> usize {

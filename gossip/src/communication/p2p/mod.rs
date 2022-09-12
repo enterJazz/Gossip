@@ -8,5 +8,6 @@ pub mod message {
         "/gossip.communicator.p2p.message.rs"
     ));
 }
+mod peer_handler;
 
 mod test;

@@ -1,5 +1,5 @@
 use crate::communication::p2p::peer::{parse_identity, peer_into_str};
-use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
+use crate::communication::p2p::peer::{Peer, PeerError};
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::net::AddrParseError;
@@ -11,14 +11,15 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use super::message;
-use super::peer::{into_addr, PeerConnectionStatus, PeerIdentity};
+use super::peer::{compute_identity, PeerConnectionStatus, PeerIdentity};
+use super::peer_handler::PeerHandler;
 
 // message type used by messages originating from server
 pub type ServerPeerMessage = (message::envelope::Msg, PeerIdentity, SocketAddr);
 pub type PeerConnectionMessage = (PeerIdentity, PeerConnectionStatus, message::Peer);
 
 type PeerReceiver = mpsc::Receiver<message::envelope::Msg>;
-type PeerSender = mpsc::Sender<message::envelope::Msg>;
+pub type PeerSender = mpsc::Sender<message::envelope::Msg>;
 type PeerBroadcastReceiver = broadcast::Receiver<message::envelope::Msg>;
 type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 
@@ -48,148 +49,92 @@ pub enum ServerError {
     RxDataChannelError,
 }
 
+/// State maintained by the P2P Server
 struct ServerState {
     max_parallel_connections: usize,
     active_peers: HashMap<PeerIdentity, PeerHandler>,
 }
 
-pub struct Server {
-    listener: TcpListener,
-    state: Arc<RwLock<ServerState>>,
-    addr: SocketAddr,
-
-    host_identity: PeerIdentity,
-    host_pub_key: bytes::Bytes,
-
-    peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
-    peer_p2p_rx: Arc<Mutex<mpsc::Receiver<ServerPeerMessage>>>,
-
-    peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
-    peer_connection_rx: Arc<Mutex<mpsc::Receiver<PeerConnectionMessage>>>,
-}
-
 impl ServerState {
-    /// Create a new, empty, instance of `Shared`.
+    /// Create a new, empty, instance of `ServerState`.
     fn new() -> Self {
         ServerState {
             active_peers: HashMap::new(),
-            max_parallel_connections: 10,
+            max_parallel_connections: 100,
         }
     }
 }
 
-struct PeerHandler {
-    msg_tx: PeerSender,
-    peer: Arc<Peer>,
+/// Server instance handling all P2P connections and communications
+pub struct Server {
+    /// Underlying TCP Listener for incoming connections
+    listener: TcpListener,
+    /// Current server state storing active peer statuses
+    state: Arc<RwLock<ServerState>>,
+
+    /// Address on which the server is running
+    addr: SocketAddr,
+
+    /// Blake3 Hash of the DER encoded host public key
+    host_identity: PeerIdentity,
+
+    /// DER encoded public key of the server
+    host_pub_key: bytes::Bytes,
+
+    /// Channel for transmitting messeages from peers to main loop for processing
+    peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
+
+    /// Channel for receiving messeages from peers on the main loop for processing
+    peer_p2p_rx: Arc<Mutex<mpsc::Receiver<ServerPeerMessage>>>,
+
+    /// Channels for sending peer connection updates
+    peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
+    /// Channels for receiving peer connection updates
+    peer_connection_rx: Arc<Mutex<mpsc::Receiver<PeerConnectionMessage>>>,
 }
 
-impl PeerHandler {
-    fn new(
-        peer: Peer,
-        peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
-        peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
-    ) -> PeerHandler {
-        let (rx_write, mut rx_read) = mpsc::channel(512);
-        let (tx_write, tx_read) = mpsc::channel(512);
-
-        let (close_sender, mut close_receiver) = mpsc::channel::<Option<PeerError>>(1);
-
-        let p = Arc::new(peer);
-        let peer_run = p.clone();
-
-        // run peer recv and send methods
-        // on transmission error write into close channel
-        tokio::spawn(async move {
-            match peer_run.run(tx_read, rx_write).await {
-                Ok(_) => close_sender.send(None).await,
-                Err(err) => close_sender.send(Some(err)).await,
-            }
-        });
-
-        let tx_clone = tx_write.clone();
-        let peer_addr = p.remote_addr();
-        let peer_identity = p.identity.clone();
-        let peer_description = p.get_peer_description();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-
-                    // message comming in from peer
-                    // receive message from peer and expand it by peer information
-                    // so that in can easily be processes in the server level
-                    peer_rx_msg = rx_read.recv() => {
-                        match peer_rx_msg {
-                            Some(msg) => match peer_p2p_tx.send((msg, peer_identity, peer_addr)).await {
-                                Ok(_) => (),
-                                Err(e) => {
-                                    error!("failed to receive message {}", e);
-                                    todo!();
-                                }
-                            }
-                            None => warn!("got empty message from peer channel")
-                        }
-                    }
-
-                    close_err = close_receiver.recv() => {
-                        match close_err {
-                            Some(Some(err)) => {
-                                error!("peer_handler: closed with error {}", err);
-                                match peer_connection_tx.send((
-                                    peer_identity,
-                                    PeerConnectionStatus::Closed("closed with error".to_string()), peer_description.clone()
-                                )).await {
-                                    Ok(_) => (),
-                                    Err(err) => {
-                                        panic!("failed to send peer connection update {}", err)
-                                    }
-                                }
-                            }
-                            _ => {debug!("peer_handler: closed without errors"); todo!();}
-                        }
-                    }
-                }
-            }
-        });
-
-        PeerHandler {
-            msg_tx: tx_write,
-            peer: p,
-        }
-    }
-
-    async fn send_msg(
-        &self,
-        msg: message::envelope::Msg,
-    ) -> Result<(), SendError<message::envelope::Msg>> {
-        self.msg_tx.send(msg).await
-    }
-}
-
+/// Runs the P2P server on a string encoded local address (Ip+Port)
+///
+/// # Arguments
+///
+/// * `addr_str` - IP:port of the P2P server on the local system e.g. 127.0.0.1:5005
+/// * `host_pub_key` - Public key of the host machine in DER format
+/// * `tx` - mpsc channel on which incoming messages will be received
+/// * `peer_connection_tx` - mpsc channel on connection status updates will be transmitted
 pub async fn run_from_str_addr(
     addr_str: &str,
     host_pub_key: bytes::Bytes,
-    rx: mpsc::Sender<ServerPeerMessage>,
+    tx: mpsc::Sender<ServerPeerMessage>,
     peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
 ) -> Result<Arc<Server>, AddrParseError> {
+    // parse address
     let addr: SocketAddr = match addr_str.parse() {
         Ok(a) => a,
         Err(err) => return Err(err),
     };
 
-    Ok(run(addr, host_pub_key, rx, peer_connection_tx).await)
+    Ok(run(addr, host_pub_key, tx, peer_connection_tx).await)
 }
 
+/// Runs the P2P server on a SocketAddr
+///
+/// # Arguments
+///
+/// * `addr` - run target for p2p server as SocketAddr instance
+/// * `host_pub_key` - Public key of the host machine in DER format
+/// * `tx` - mpsc channel on which incoming messages will be received
+/// * `peer_connection_tx` - mpsc channel on connection status updates will be transmitted
 pub async fn run(
     addr: SocketAddr,
     host_pub_key: bytes::Bytes,
-    rx: mpsc::Sender<ServerPeerMessage>,
+    tx: mpsc::Sender<ServerPeerMessage>,
     peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
 ) -> Arc<Server> {
     let server = Arc::new(Server::new(addr, host_pub_key).await);
 
     let s = server.clone();
     tokio::spawn(async move {
-        match s.run(rx, peer_connection_tx).await {
+        match s.run(tx, peer_connection_tx).await {
             Ok(()) => info!("p2p/server: executed finished"),
             Err(err) => error!("p2p/server: execution aborted due to error {}", err),
         }
@@ -199,6 +144,12 @@ pub async fn run(
 }
 
 impl Server {
+    /// Creates a new Server instance without starting the run loop
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - run target for p2p server as SocketAddr instance
+    /// * `host_pub_key` - Public key of the host machine in DER format
     pub async fn new(addr: SocketAddr, host_pub_key: bytes::Bytes) -> Self {
         // construct underlaying TCP connection
         // forcefully unwrap here, it is expected that server dies if tcp listener cannot be started
@@ -210,7 +161,7 @@ impl Server {
         // channel for handling peer removal
         let (peer_connection_tx, peer_connection_rx) = mpsc::channel(512);
 
-        let identity = *blake3::hash(&host_pub_key.clone()).as_bytes();
+        let identity = compute_identity(&host_pub_key.clone());
 
         info!(
             "starting P2P server {} id={}",
@@ -235,6 +186,17 @@ impl Server {
         }
     }
 
+    /// Run main server loop. Handles incoming connections to peers and formwards
+    /// a filtered subset of messages to the external p2p_external_tx channel.
+    /// Connection status updates are forwarded to connection_p2p_external_tx when
+    /// a peer connects or disconnects from the server.
+    /// NOTE: run cannot be called multiple times, if called multiple times this method
+    /// will block until the first call terminates.
+    ///
+    /// # Arguments
+    ///
+    /// * `p2p_external_tx` - Channel for all incoming messages from other peers
+    /// * `connection_p2p_external_tx` - Channel for connection update notifications
     pub async fn run(
         &self,
         p2p_external_tx: mpsc::Sender<ServerPeerMessage>,
@@ -259,7 +221,10 @@ impl Server {
                     };
 
                     info!("run: incoming connection from {}", addr);
-                    self.accept(stream).await;
+                    match self.accept(stream).await {
+                        Ok(_) => debug!("peer connection accepted"),
+                        Err(err) => warn!("failed to accept peer connection: {}", err)
+                    }
                 }
 
                 // handle messages from peers after a peer is active
@@ -274,18 +239,21 @@ impl Server {
 
 
                     match msg {
+                        // forward selected subset of messages to upper layer
+                        // - Pull, PullResponse, Rumor are used for Gossip Push&Pull
+                        // - Data is for message passing between peers
                         message::envelope::Msg::Pull(_) |
                         message::envelope::Msg::Data(_) |
                         message::envelope::Msg::PullResponse(_) |
                         message::envelope::Msg::Rumor(_)  => {
                             match p2p_external_tx.send((msg, identity, peer_addr)).await {
                                 Ok(_) => (),
-                                Err(err) => return Err(ServerError::RxDataChannelError),
+                                Err(_) => return Err(ServerError::RxDataChannelError),
                             };
                         }
+                        // peers should not pass connection related messages
                         _ => {
-                            unreachable!("run: got internal message {:?}", msg)
-
+                            unreachable!("peer send internal message over external communication channel: {:?}", msg)
                         }
                     }
                 }
@@ -312,20 +280,23 @@ impl Server {
         }
     }
 
+    /// Accept handles incomming connections and initiates the PoW connection process.
+    /// The challenge is always stated by the accepting party.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - Incoming TCP stream
     async fn accept(&self, stream: TcpStream) -> Result<(), ServerError> {
-        let state = self.state.read().await;
-        // Close incomming connection if server has reached its maximum connection counter
-        if state.active_peers.keys().len() == state.max_parallel_connections {
-            debug!("p2p/server/accept_connection: max number connections reached closing");
+        if !self.can_accept_more_peers().await {
             return Err(ServerError::PeerLimitReached);
         }
-        drop(state);
 
         let host_identity = self.get_identity();
         let host_pub_key = self.host_pub_key.clone();
-
         let mut peer = Peer::new(stream);
 
+        // execute peer challenge
+        // only add connection after successful PoW challenge process
         match peer.challenge(host_identity, host_pub_key).await {
             Ok(_) => {
                 let addr = peer.remote_addr();
@@ -342,21 +313,23 @@ impl Server {
         }
     }
 
-    // connect to remote peer‚
+    /// Connect is the counterpart to accept and initiates a connection to a remove P2P server.
+    /// This will trigger accept on the remote server and start the PoW connection process.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Address of the P2P server to which to establish a connection
     pub async fn connect<T: ToSocketAddrs>(&self, addr: T) -> Result<(), ServerError> {
+        if !self.can_accept_more_peers().await {
+            return Err(ServerError::PeerLimitReached);
+        }
+
         let mut peer = match Peer::new_from_addr(addr).await {
             Err(err) => return Err(ServerError::PeerConnectionError(err)),
             Ok(peer) => peer,
         };
 
-        let state = self.state.read().await;
-        // Close incomming connection if server has reached its maximum connection counter
-        if state.active_peers.keys().len() == state.max_parallel_connections {
-            debug!("p2p/server/accept_connection: max number connections reached closing");
-            return Err(ServerError::DuplicatePeer);
-        }
-        drop(state);
-
+        // process the PoW connection hanshake
         let identity = match peer
             .connect(
                 self.host_identity.clone(),
@@ -372,12 +345,19 @@ impl Server {
         self.add_connection(identity, peer).await
     }
 
+    /// Remove a peer given its Identity from the active peer pool
     pub async fn disconnect(&self, identity: PeerIdentity) -> Option<message::Peer> {
         self.remove_connection(identity)
             .await
-            .map_or(None, |p| Some(p.peer.get_peer_description()))
+            .map_or(None, |p| Some(p.get_description()))
     }
 
+    /// Add a previosly established Peer connection (after PoW) to the active connection pool
+    ///
+    /// # Arguments
+    ///
+    /// * `identity` - Blake3 Hash of peer DER encoded public key
+    /// * `peer` - Peer instance wrapping the underlying TCP Stream
     async fn add_connection(&self, identity: PeerIdentity, peer: Peer) -> Result<(), ServerError> {
         let description = peer.get_peer_description();
         let addr = peer.get_peer_addr();
@@ -407,11 +387,22 @@ impl Server {
         Ok(())
     }
 
+    // Remove a connection from the active pool and call internal cleanup methods
     async fn remove_connection(&self, identity: PeerIdentity) -> Option<PeerHandler> {
         let mut state = self.state.write().await;
-        state.active_peers.remove(&identity)
+        if let Some(mut peer) = state.active_peers.remove(&identity) {
+            peer.shutdown().await;
+            return Some(peer);
+        }
+        None
     }
 
+    /// Transmit a Message to an individual peer given its Identity
+    ///
+    /// # Arguments
+    ///
+    /// * `identity` - Blake3 Hash of peer DER encoded public key
+    /// * `msg` - Message to be transmitted to the peer
     pub async fn send_to_peer(
         &self,
         identity: PeerIdentity,
@@ -419,7 +410,6 @@ impl Server {
     ) -> Result<(), ServerError> {
         let state = self.state.read().await;
         if let Some(peer) = state.active_peers.get(&identity) {
-            // TODO: make sure actual transmission has happened
             match peer.msg_tx.send(msg).await {
                 Ok(_) => return Ok(()),
                 Err(e) => return Err(ServerError::PeerSendError),
@@ -430,16 +420,22 @@ impl Server {
         })
     }
 
+    /// Broadcasts the message to all active peers with identities matching the exclude_identities list
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Data to be transmitted to all active peers not included in exclude_identities list
+    /// * `exclude_identities` - Slice of identities that will be ignored during broadcast, these identities will also be omitted in the sulting PeerIdentity list in the result
     pub async fn broadcast(
         &self,
         data: message::Data,
-        exclude_addrs: Vec<PeerIdentity>,
+        exclude_identities: Vec<PeerIdentity>,
     ) -> Result<Vec<PeerIdentity>, tokio::sync::broadcast::error::SendError<message::envelope::Msg>>
     {
-        // get a list of peers excluding peers listed in exclude_addrs
+        // get a list of peers excluding peers listed in exclude_identities
         let connected_peers = self.get_peer_list(None).await;
         let peers = connected_peers.iter().filter(|p| {
-            match exclude_addrs
+            match exclude_identities
                 .iter()
                 .find(|&&exclude_peer| exclude_peer.to_vec() == p.identity)
             {
@@ -476,7 +472,14 @@ impl Server {
         }
     }
 
-    pub async fn push(&self, rumor: message::Rumor) -> Result<(), ServerError> {
+    /// Naive Gossip Push implementation
+    /// - select a random peer from the active peer list
+    /// - pass rumor/view to the selected peer
+    pub async fn push(
+        &self,
+        identity: Option<PeerIdentity>,
+        rumor: message::Rumor,
+    ) -> Result<(), ServerError> {
         let random_identity = match self.random_active_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),
@@ -493,7 +496,11 @@ impl Server {
         }
     }
 
-    pub async fn pull(&self) -> Result<(), ServerError> {
+    /// Naive Gossip Pull implementation
+    /// - sample a random peer
+    /// - send pull request with random identifier
+    /// - wait for response in incomming messages
+    pub async fn pull(&self, identity: Option<PeerIdentity>) -> Result<(), ServerError> {
         let random_identity = match self.random_active_peer().await {
             Ok(addr) => addr,
             Err(err) => return Err(err),
@@ -501,7 +508,6 @@ impl Server {
 
         // request peer for its knowledge base
         // response will be handled by normal handler routine
-        // FIXME: use correct ttl
         let pull_req = message::envelope::Msg::Pull(message::PullRequest {
             id: 1,
             signature: vec![],
@@ -515,6 +521,7 @@ impl Server {
         }
     }
 
+    /// Returns a list of currently conencted peers with extended information
     async fn get_peer_list(&self, exclude_addr: Option<PeerIdentity>) -> Vec<message::Peer> {
         let state = self.state.read().await;
 
@@ -528,30 +535,30 @@ impl Server {
                     continue;
                 }
             }
-            peers.push(peer_handler.peer.get_peer_description())
+            peers.push(peer_handler.get_description())
         }
 
         peers
     }
 
+    /// Returns the identity of the host running the server
     pub fn get_identity(&self) -> PeerIdentity {
         self.host_identity.clone()
     }
 
+    /// Returns a list of currently conencted peer identifiers
     pub async fn get_active_peer_identities(&self) -> Vec<PeerIdentity> {
         let state = self.state.read().await;
         state.active_peers.iter().map(|(id, _)| *id).collect()
     }
 
-    pub async fn print_conns(&self) {
+    async fn can_accept_more_peers(&self) -> bool {
         let state = self.state.read().await;
-
-        for (identity, peer) in &state.active_peers {
-            println!(
-                "connected to identity={} addr={:?}",
-                peer_into_str(*identity),
-                peer.peer.get_peer_addr()
-            )
+        // Close incomming connection if server has reached its maximum connection counter
+        if state.active_peers.keys().len() == state.max_parallel_connections {
+            debug!("p2p/server/accept_connection: max number connections reached closing");
+            return false;
         }
+        return true;
     }
 }
