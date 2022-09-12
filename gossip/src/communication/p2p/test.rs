@@ -5,37 +5,100 @@ use crate::{
 use log::{error, info};
 use std::str;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+
+async fn create_peer(
+    port: u16,
+) -> (
+    Arc<p2p::server::Server>,
+    mpsc::Receiver<p2p::server::ServerPeerMessage>,
+    mpsc::Receiver<p2p::server::PeerConnectionMessage>,
+) {
+    let (tx, rx) = mpsc::channel(512);
+    let (conn_tx, conn_rx) = mpsc::channel(512);
+
+    let key = bytes::Bytes::from(format!("this is not a real key {}", port));
+
+    let s = match p2p::server::run_from_str_addr(
+        &format!("127.0.0.1:{}", port).to_string(),
+        key,
+        tx,
+        conn_tx,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(err) => panic!("failed to start server {}", err),
+    };
+
+    (s, rx, conn_rx)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn p2p_unique_connection_test() {
+    use core::panic;
+
+    let (s1, _, _) = create_peer(1333).await;
+    let (s2, mut rx_2, _) = create_peer(1334).await;
+
+    // connect peers for test case
+    match s2.connect("127.0.0.1:1333").await {
+        Ok(()) => (),
+        Err(e) => {
+            panic!("failed to connect {}", e);
+        }
+    };
+
+    match s1.connect("127.0.0.1:1334").await {
+        Ok(()) => panic!("duplicate connection created"),
+        Err(e) => match e {
+            p2p::peer::PeerError::Duplicate => (),
+            _ => panic!("got unexpected error"),
+        },
+    };
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn p2p_send_to_test() {
+    let (s1, _, _) = create_peer(1333).await;
+    let (s2, mut rx_2, _) = create_peer(1334).await;
+
+    // connect peers for test case
+    match s2.connect("127.0.0.1:1333").await {
+        Ok(()) => (),
+        Err(e) => {
+            panic!("failed to connect {}", e);
+        }
+    };
+
+    let payload = "hello there";
+    let msg = message::Data {
+        ttl: 1,
+        data_type: 2,
+        payload: payload.as_bytes().to_vec(),
+    };
+    _ = s1
+        .send_to_peer(s2.get_identity(), p2p::message::envelope::Msg::Data(msg))
+        .await;
+
+    match rx_2.recv().await {
+        Some((p2p::message::envelope::Msg::Data(msg), identity, _)) => {
+            assert_eq!(identity, s1.get_identity());
+            assert_eq!(str::from_utf8(&msg.payload.to_vec()).unwrap(), payload);
+        }
+        None => panic!("failed to receive message"),
+        _ => panic!("received unexpected message"),
+    };
+}
 
 #[cfg(test)]
 #[tokio::test]
 async fn p2p_broadcast_test() {
-    use tokio::sync::mpsc;
-
-    let (tx_1, mut rx_1) = mpsc::channel(512);
-    let (tx_2, mut rx_2) = mpsc::channel(512);
-    let (tx_3, mut rx_3) = mpsc::channel(512);
-    let (conn_tx_1, mut conn_rx_1) = mpsc::channel(512);
-    let (conn_tx_2, mut conn_rx_2) = mpsc::channel(512);
-    let (conn_tx_3, mut conn_rx_3) = mpsc::channel(512);
-
-    // kreate some nonsense keys for peers
-    let k1 = bytes::Bytes::from("this is not a real key 01");
-    let k2 = bytes::Bytes::from("this is not a real key 02");
-    let k3 = bytes::Bytes::from("this is not a real key 03");
-
-    let s1 = match p2p::server::run_from_str_addr("127.0.0.1:1333", k1, tx_1, conn_tx_1).await {
-        Ok(s) => s,
-        Err(err) => panic!("failed to start server {}", err),
-    };
-
-    let s2 = match p2p::server::run_from_str_addr("127.0.0.1:1334", k2, tx_2, conn_tx_2).await {
-        Ok(s) => s,
-        Err(err) => panic!("failed to start server {}", err),
-    };
-    let s3 = match p2p::server::run_from_str_addr("127.0.0.1:1335", k3, tx_3, conn_tx_3).await {
-        Ok(s) => s,
-        Err(err) => panic!("failed to start server {}", err),
-    };
+    let (s1, _, _) = create_peer(1333).await;
+    let (s2, mut rx_2, _) = create_peer(1334).await;
+    let (s3, mut rx_3, _) = create_peer(1335).await;
 
     // connect peers for test case
     match s2.connect("127.0.0.1:1333").await {
@@ -53,37 +116,28 @@ async fn p2p_broadcast_test() {
     };
 
     let payload = "hello there";
-
     let msg = message::Data {
         ttl: 1,
         data_type: 2,
         payload: payload.as_bytes().to_vec(),
     };
-    return todo!("fix @wlad");
-    //    match s1.broadcast(msg).await {
-    //        Ok(size) => info!("send okay {}", size),
-    //        Err(e) => error!("err {}", e),
-    //    };
-    //
-    //    loop {
-    //        match tx_2.recv().await {
-    //            Some((data, addr)) => {
-    //                println!("s2: got message from {}", addr);
-    //                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-    //                break;
-    //            }
-    //            None => (),
-    //        }
-    //    }
-    //
-    //    loop {
-    //        match tx_3.recv().await {
-    //            Some((data, addr)) => {
-    //                println!("s3: got message from {}", addr);
-    //                assert_eq!(str::from_utf8(&data.payload.to_vec()).unwrap(), payload);
-    //                break;
-    //            }
-    //            None => (),
-    //        }
-    //    }
+    _ = s1.broadcast(msg, Vec::new()).await;
+
+    match rx_2.recv().await {
+        Some((p2p::message::envelope::Msg::Data(msg), identity, _)) => {
+            assert_eq!(identity, s1.get_identity());
+            assert_eq!(str::from_utf8(&msg.payload.to_vec()).unwrap(), payload);
+        }
+        None => panic!("failed to receive message"),
+        _ => panic!("received unexpected message"),
+    };
+
+    match rx_3.recv().await {
+        Some((p2p::message::envelope::Msg::Data(msg), identity, _)) => {
+            assert_eq!(identity, s1.get_identity());
+            assert_eq!(str::from_utf8(&msg.payload.to_vec()).unwrap(), payload);
+        }
+        None => panic!("failed to receive message"),
+        _ => panic!("received unexpected message"),
+    };
 }
