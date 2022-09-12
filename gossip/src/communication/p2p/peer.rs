@@ -300,8 +300,13 @@ impl Peer {
         }
     }
 
-    // initiate the connection process by publishing challenge to the other party defined by the underlying
+    // Initiate the connection process by publishing challenge to the other party defined by the underlying
     // TCP Stream
+    ///
+    /// # Arguments
+    ///
+    /// * `host_identity` - Blake3 Hash of the DER encoded public key
+    /// * `host_pub_key` - DER encoded public key of the host P2P server
     pub async fn challenge(
         &mut self,
         host_identity: PeerIdentity,
@@ -334,7 +339,15 @@ impl Peer {
     }
 
     /// Read incoming Pow Challenge request and solve it
-    /// Returns a peer identity if solution was found in time
+    ///
+    /// # Arguments
+    ///
+    /// * `host_identity` - Blake3 Hash of the DER encoded public key#
+    /// * `host_connection_port` - port the host P2P server is listening on
+    /// * `host_pub_key` - DER encoded public key of the host P2P server
+    ///
+    /// # Results
+    /// If remote peer has validated the challenge peer identity is returned, otherwise a PeerError is returned
     async fn solve_pow(
         &mut self,
         host_identity: PeerIdentity,
@@ -439,6 +452,12 @@ impl Peer {
         Ok(peer_identity)
     }
 
+    /// Requests a PoW solution from the peer and validates the response
+    ///
+    /// # Arguments
+    ///
+    /// * `host_identity` - Blake3 Hash of the DER encoded public key
+    /// * `host_pub_key` - DER encoded public key of the host P2P server
     async fn request_pow(
         &mut self,
         host_identity: PeerIdentity,
@@ -528,11 +547,13 @@ impl Peer {
         }
     }
 
+    /// Sends a msg to the peer while wrapping it in envelope::Envelope
     pub async fn send_and_wrap_msg(&self, msg: envelope::Msg) -> Result<(), SendError> {
         let envelope = Envelope { msg: Some(msg) };
         self.send_msg(envelope).await
     }
 
+    /// Read a msg from the peer while unwrapping it the Envelope
     pub async fn read_and_unwrap_msg(&self) -> Result<envelope::Msg, RecvError> {
         match self.read_msg().await {
             Ok(envelope) => match envelope.msg {
@@ -591,6 +612,7 @@ impl Peer {
         }
     }
 
+    /// Runs the send and receive loop of the peer
     pub async fn run(
         &self,
         mut tx: mpsc::Receiver<envelope::Msg>,
@@ -623,6 +645,7 @@ impl Peer {
         }
     }
 
+    /// Generates a new verification request object
     async fn gen_verification_challenge_request(
         host_pub_key: bytes::Bytes,
     ) -> ([u8; CHALLENGE_LEN], VerificationRequest) {

@@ -91,6 +91,7 @@ impl PeerHandler {
         }
     }
 
+    /// Send message to individual peer
     async fn send_msg(
         &self,
         msg: message::envelope::Msg,
@@ -98,10 +99,12 @@ impl PeerHandler {
         self.msg_tx.send(msg).await
     }
 
+    /// Get a purely info representation of the underlying peer in p2p::messages::Peer format
     pub fn get_description(&self) -> message::Peer {
         self.peer.get_peer_description()
     }
 
+    /// Perform graceful shutdown on peer
     pub async fn shutdown(&mut self) {
         // NOTE: add when needed
     }

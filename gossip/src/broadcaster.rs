@@ -249,7 +249,7 @@ impl Broadcaster {
                                 p2p::message::envelope::Msg::PullResponse(rumor) |
                                 p2p::message::envelope::Msg::Rumor(rumor) => {
                                     view.clone().write().await.merge(rumor);
-                                    info!("{}", view.clone().read().await);
+                                    println!("{}", view.clone().read().await);
                                 }
                                 p2p::message::envelope::Msg::Pull(req) => {
                                     _ = pull_request_tx.send((identity, req)).await;
@@ -261,7 +261,7 @@ impl Broadcaster {
                         _ => ()
                     }
 
-                    info!("{}", knowledge_base.read().await);
+                    println!("{}", knowledge_base.read().await);
                 }
 
 
@@ -327,7 +327,6 @@ impl Broadcaster {
         let v = view.read().await;
 
         let mut failed_connections: Vec<p2p::peer::PeerIdentity> = Vec::new();
-        // TODO: move somewhere else
         // connect to unconnected peers
         for (id, peer) in &v.known_peers {
             // skip if node is our own p2p server
@@ -376,8 +375,6 @@ impl Broadcaster {
         let view_push_pull_clone = view.clone();
 
         loop {
-            // TODO: stop this loop if server is down
-
             tokio::select! {
                 _ = push_interval.tick() => {
                     let snapshot = view_push_pull_clone.clone().read().await.clone();

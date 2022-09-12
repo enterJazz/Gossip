@@ -4,7 +4,7 @@ use rand::{self, RngCore};
 use tokio::sync::{broadcast, mpsc};
 
 /// Number of concurrent tasks used to calculate nonce
-const N_TASKS: usize = 16;
+const N_TASKS: usize = 8;
 
 /// Length of the challenge field in bytes
 pub const CHALLENGE_LEN: usize = 4;
