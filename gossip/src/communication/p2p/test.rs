@@ -53,7 +53,7 @@ async fn p2p_unique_connection_test() {
     match s1.connect("127.0.0.1:1334").await {
         Ok(()) => panic!("duplicate connection created"),
         Err(e) => match e {
-            p2p::peer::PeerError::Duplicate => (),
+            p2p::server::ServerError::DuplicatePeer => (),
             _ => panic!("got unexpected error"),
         },
     };
@@ -100,14 +100,6 @@ async fn p2p_broadcast_test() {
     let (s2, rx_2, _) = create_peer(1334).await;
     let (s3, rx_3, _) = create_peer(1335).await;
     let (s4, rx_4, _) = create_peer(1336).await;
-
-    // connect peers for test case
-    match s2.connect("127.0.0.1:1333").await {
-        Ok(()) => (),
-        Err(e) => {
-            panic!("failed to connect {}", e);
-        }
-    };
 
     for s in [s2, s3, s4] {
         match s.connect("127.0.0.1:1333").await {

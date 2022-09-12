@@ -1,7 +1,6 @@
 use crate::communication::p2p::peer::{parse_identity, peer_into_str};
 use crate::communication::p2p::peer::{Peer, PeerError, PeerResult};
 use log::{debug, error, info, warn};
-use rand::seq::IteratorRandom;
 use std::collections::HashMap;
 use std::net::AddrParseError;
 use std::net::SocketAddr;
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use super::message;
 use super::peer::{into_addr, PeerConnectionStatus, PeerIdentity};
@@ -25,6 +24,12 @@ type PeerBroadcastSender = broadcast::Sender<message::envelope::Msg>;
 
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error("peer connection error ({0})")]
+    PeerConnectionError(#[from] PeerError),
+    #[error("peer limit reached")]
+    PeerLimitReached,
+    #[error("duplicate peer connection detected")]
+    DuplicatePeer,
     #[error("server peer close error")]
     PeerCloseError,
     #[error("could not transfer message to peer handler")]
@@ -50,7 +55,7 @@ struct ServerState {
 
 pub struct Server {
     listener: TcpListener,
-    state: Arc<Mutex<ServerState>>,
+    state: Arc<RwLock<ServerState>>,
     addr: SocketAddr,
 
     host_identity: PeerIdentity,
@@ -160,53 +165,6 @@ impl PeerHandler {
     }
 }
 
-async fn accept_connection(
-    state_ref: Arc<Mutex<ServerState>>,
-    stream: TcpStream,
-    host_identity: PeerIdentity,
-    host_pub_key: bytes::Bytes,
-    peer_p2p_tx: mpsc::Sender<ServerPeerMessage>,
-    peer_connection_tx: mpsc::Sender<PeerConnectionMessage>,
-) {
-    let mut state = state_ref.lock().await;
-    // Close incomming connection if server has reached its maximum connection counter
-    if state.active_peers.keys().len() == state.max_parallel_connections {
-        debug!("p2p/server/accept_connection: max number connections reached closing");
-        return;
-    }
-
-    // TODO: don't forget to remove peers when they become inactive
-    state.max_parallel_connections = state.max_parallel_connections + 1;
-
-    // perform challenge acceptance in an async call to not block accept
-    let state_ref = state_ref.clone();
-    tokio::spawn(async move {
-        let mut peer = Peer::new(stream);
-
-        match peer.challenge(host_identity, host_pub_key).await {
-            Ok(resp) => {
-                let mut state = state_ref.lock().await;
-                let addr = peer.remote_addr();
-                let peer_description = peer.get_peer_description();
-                let identity = peer.identity.clone();
-                info!(
-                    "accept: completed challenge addr={}, id={}",
-                    addr,
-                    peer_into_str(peer.identity)
-                );
-                let handler = PeerHandler::new(peer, peer_p2p_tx, peer_connection_tx.clone());
-                // store peer state
-                state.active_peers.insert(identity, handler);
-
-                _ = peer_connection_tx
-                    .send((identity, PeerConnectionStatus::Connected, peer_description))
-                    .await;
-            }
-            Err(err) => error!("p2p/server/accept: challenge failed {}", err),
-        }
-    });
-}
-
 pub async fn run_from_str_addr(
     addr_str: &str,
     host_pub_key: bytes::Bytes,
@@ -261,7 +219,7 @@ impl Server {
         );
 
         Server {
-            state: Arc::new(Mutex::new(ServerState::new())),
+            state: Arc::new(RwLock::new(ServerState::new())),
             listener,
             addr,
 
@@ -301,14 +259,7 @@ impl Server {
                     };
 
                     info!("run: incoming connection from {}", addr);
-                    accept_connection(
-                        self.state.clone(),
-                        stream,
-                        self.host_identity,
-                        self.host_pub_key.clone(),
-                        self.peer_p2p_tx.clone(),
-                        self.peer_connection_tx.clone(),
-                    ).await;
+                    self.accept(stream).await;
                 }
 
                 // handle messages from peers after a peer is active
@@ -361,14 +312,50 @@ impl Server {
         }
     }
 
+    async fn accept(&self, stream: TcpStream) -> Result<(), ServerError> {
+        let state = self.state.read().await;
+        // Close incomming connection if server has reached its maximum connection counter
+        if state.active_peers.keys().len() == state.max_parallel_connections {
+            debug!("p2p/server/accept_connection: max number connections reached closing");
+            return Err(ServerError::PeerLimitReached);
+        }
+        drop(state);
+
+        let host_identity = self.get_identity();
+        let host_pub_key = self.host_pub_key.clone();
+
+        let mut peer = Peer::new(stream);
+
+        match peer.challenge(host_identity, host_pub_key).await {
+            Ok(_) => {
+                let addr = peer.remote_addr();
+                let identity = peer.identity.clone();
+                info!(
+                    "accept: completed challenge addr={}, id={}",
+                    addr,
+                    peer_into_str(peer.identity)
+                );
+
+                self.add_connection(identity, peer).await
+            }
+            Err(err) => Err(ServerError::PeerConnectionError(err)),
+        }
+    }
+
     // connect to remote peer‚
-    pub async fn connect<T: ToSocketAddrs>(&self, addr: T) -> PeerResult<()> {
+    pub async fn connect<T: ToSocketAddrs>(&self, addr: T) -> Result<(), ServerError> {
         let mut peer = match Peer::new_from_addr(addr).await {
-            Err(e) => return Err(e),
+            Err(err) => return Err(ServerError::PeerConnectionError(err)),
             Ok(peer) => peer,
         };
 
-        // TODO: @wlad check for duplicate connections here
+        let state = self.state.read().await;
+        // Close incomming connection if server has reached its maximum connection counter
+        if state.active_peers.keys().len() == state.max_parallel_connections {
+            debug!("p2p/server/accept_connection: max number connections reached closing");
+            return Err(ServerError::DuplicatePeer);
+        }
+        drop(state);
 
         let identity = match peer
             .connect(
@@ -378,52 +365,50 @@ impl Server {
             )
             .await
         {
-            Err(e) => return Err(e),
+            Err(err) => return Err(ServerError::PeerConnectionError(err)),
             Ok(id) => id,
         };
 
-        let peer_addr = peer.get_peer_addr();
-        let peer_description = peer.get_peer_description();
-        info!(
-            "connected: addr={:?} id={:?}",
-            peer_addr,
-            peer_into_str(identity)
-        );
-
-        self.add_connection(identity, peer).await;
-
-        info!(
-            "p2p/server/connect: peer {:?} added to active pool",
-            peer_addr
-        );
-
-        _ = self
-            .peer_connection_tx
-            .send((identity, PeerConnectionStatus::Connected, peer_description))
-            .await;
-
-        Ok(())
+        self.add_connection(identity, peer).await
     }
 
-    async fn add_connection(&self, identity: PeerIdentity, peer: Peer) {
-        // store connection on state
-        let r = self.state.clone();
-        let mut state = r.lock().await;
+    pub async fn disconnect(&self, identity: PeerIdentity) -> Option<message::Peer> {
+        self.remove_connection(identity)
+            .await
+            .map_or(None, |p| Some(p.peer.get_peer_description()))
+    }
+
+    async fn add_connection(&self, identity: PeerIdentity, peer: Peer) -> Result<(), ServerError> {
+        let description = peer.get_peer_description();
+        let addr = peer.get_peer_addr();
+        let mut state = self.state.write().await;
         let handler = PeerHandler::new(
             peer,
             self.peer_p2p_tx.clone(),
             self.peer_connection_tx.clone(),
         );
+
+        // if connection with this identity already exists drop the new connection
+        if let Some(_) = state.active_peers.get(&identity) {
+            return Err(ServerError::DuplicatePeer);
+        }
+
         // store peer state
-        state.active_peers.insert(identity, handler);
+        if let Some(_) = state.active_peers.insert(identity, handler) {
+            unreachable!("peers should never be replaced with newly connected peers")
+        }
+        info!("peer {:?} added to active pool", addr);
+        _ = self
+            .peer_connection_tx
+            .clone()
+            .send((identity, PeerConnectionStatus::Connected, description))
+            .await;
+
+        Ok(())
     }
 
     async fn remove_connection(&self, identity: PeerIdentity) -> Option<PeerHandler> {
-        let r = self.state.clone();
-        let mut state = r.lock().await;
-
-        // TODO: properly close connection
-
+        let mut state = self.state.write().await;
         state.active_peers.remove(&identity)
     }
 
@@ -432,7 +417,7 @@ impl Server {
         identity: PeerIdentity,
         msg: message::envelope::Msg,
     ) -> Result<(), ServerError> {
-        let state = self.state.lock().await;
+        let state = self.state.read().await;
         if let Some(peer) = state.active_peers.get(&identity) {
             // TODO: make sure actual transmission has happened
             match peer.msg_tx.send(msg).await {
@@ -481,8 +466,9 @@ impl Server {
     // select a random peer using
     // cryptographically random number generator
     async fn random_active_peer(&self) -> Result<PeerIdentity, ServerError> {
-        let state = self.state.lock().await;
+        use rand::prelude::IteratorRandom;
 
+        let state = self.state.read().await;
         if let Some(key) = state.active_peers.keys().choose(&mut rand::thread_rng()) {
             Ok(key.clone())
         } else {
@@ -530,7 +516,7 @@ impl Server {
     }
 
     async fn get_peer_list(&self, exclude_addr: Option<PeerIdentity>) -> Vec<message::Peer> {
-        let state = self.state.lock().await;
+        let state = self.state.read().await;
 
         // IDEA: preallocate capacity since its always peers.length() - 1
         let mut peers: Vec<message::Peer> = Vec::new();
@@ -552,8 +538,13 @@ impl Server {
         self.host_identity.clone()
     }
 
+    pub async fn get_active_peer_identities(&self) -> Vec<PeerIdentity> {
+        let state = self.state.read().await;
+        state.active_peers.iter().map(|(id, _)| *id).collect()
+    }
+
     pub async fn print_conns(&self) {
-        let state = self.state.lock().await;
+        let state = self.state.read().await;
 
         for (identity, peer) in &state.active_peers {
             println!(

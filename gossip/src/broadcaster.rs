@@ -44,22 +44,6 @@ pub struct Broadcaster {
     knowledge_base: Vec<KnowledgeItem>,
 }
 
-fn api_msg_from_p2p(data: p2p::message::Data) -> api::message::ApiMessage {
-    api::message::ApiMessage::Announce(api::payload::announce::Announce {
-        ttl: data.ttl as u8,
-        data_type: data.data_type as u16,
-        data: bytes::Bytes::from(data.payload),
-    })
-}
-
-fn p2p_msg_from_api(msg: api::payload::announce::Announce) -> p2p::message::Data {
-    p2p::message::Data {
-        data_type: msg.data_type as u32,
-        ttl: msg.ttl as u32,
-        payload: msg.data.to_vec(),
-    }
-}
-
 impl Broadcaster {
     pub async fn new(config: Config) -> Broadcaster {
         Broadcaster {
@@ -67,10 +51,6 @@ impl Broadcaster {
             knowledge_base: Vec::new(),
             config,
         }
-    }
-
-    async fn view_snapshot(self) -> View {
-        self.view.read().await.clone()
     }
 
     pub async fn run(self) -> Result<(), BroadcasterError> {
@@ -83,7 +63,6 @@ impl Broadcaster {
             mpsc::channel::<Result<api::message::ApiMessage, api::server::Error>>(512);
 
         // broadcaster - p2p channels
-        let (broadcaster_p2p_tx, mut broadcaster_p2p_rx) = mpsc::channel::<p2p::message::Data>(512);
         let (p2p_broadcaster_tx, mut p2p_broadcaster_rx) = mpsc::channel(512);
         let (pull_request_tx, mut pull_request_rx) = mpsc::channel(512);
 
@@ -337,5 +316,21 @@ impl Broadcaster {
 
             };
         }
+    }
+}
+
+fn api_msg_from_p2p(data: p2p::message::Data) -> api::message::ApiMessage {
+    api::message::ApiMessage::Announce(api::payload::announce::Announce {
+        ttl: data.ttl as u8,
+        data_type: data.data_type as u16,
+        data: bytes::Bytes::from(data.payload),
+    })
+}
+
+fn p2p_msg_from_api(msg: api::payload::announce::Announce) -> p2p::message::Data {
+    p2p::message::Data {
+        data_type: msg.data_type as u32,
+        ttl: msg.ttl as u32,
+        payload: msg.data.to_vec(),
     }
 }
