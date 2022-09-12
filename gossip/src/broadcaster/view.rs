@@ -1,6 +1,10 @@
 use crate::communication::p2p;
 use log::{debug, info};
-use std::{collections::HashMap, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display},
+    net::SocketAddr,
+};
 
 #[derive(Clone)]
 pub struct PeerViewItem {
@@ -25,6 +29,18 @@ impl PeerViewItem {
         } else {
             None
         }
+    }
+}
+
+impl Display for PeerViewItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}|{}] [active:{}] ",
+            p2p::peer::from_addr(self.info.address.as_ref().unwrap()).unwrap(),
+            p2p::peer::peer_into_str(p2p::peer::parse_identity(&self.info.identity).unwrap()),
+            self.is_active,
+        )
     }
 }
 
@@ -78,6 +94,10 @@ impl View {
         }
     }
 
+    pub fn remove_peer(&mut self, identity: &p2p::peer::PeerIdentity) -> Option<PeerViewItem> {
+        self.known_peers.remove(identity)
+    }
+
     pub fn process_peer_update(
         &mut self,
         identity: p2p::peer::PeerIdentity,
@@ -108,20 +128,30 @@ impl View {
                 .collect(),
         }
     }
+}
 
-    pub fn print(&self) {
-        println!("");
-        println!("peer view");
-        println!("----------");
-        for (id, peer) in &self.known_peers {
-            println!(
-                "{}: addr={:?} active={} ",
-                p2p::peer::peer_into_str(*id),
-                peer.info.address,
-                peer.is_active,
-            )
+impl Display for View {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        _ = writeln!(f, "");
+        _ = writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        );
+        _ = writeln!(
+            f,
+            "                                  peer view                                 "
+        );
+        _ = writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        );
+        for (_, peer) in &self.known_peers {
+            _ = writeln!(f, "{}", peer);
         }
-        println!("");
+        writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        )
     }
 }
 

@@ -3,14 +3,14 @@ mod view;
 
 use core::panic;
 use log::{debug, error, info, warn};
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration, vec};
 use thiserror::Error;
 
 use tokio::{
     io,
     net::TcpListener,
     sync::{mpsc, RwLock},
-    time::interval,
+    time::{interval, Interval},
 };
 
 use crate::{
@@ -32,6 +32,9 @@ pub enum BroadcasterError {
 }
 
 pub struct Broadcaster {
+    pull_interval_range: (Duration, Duration),
+    push_interval_range: (Duration, Duration),
+
     // broadcaster_api_tx: mpsc::Sender<api::message::ApiMessage>,
     // api_broadcaster_rx: mpsc::Receiver<Result<api::message::ApiMessage, api::message::Error>>,
     // p2p_broadcast_tx: mpsc::Sender<(p2p::message::Data, SocketAddr)>,
@@ -47,6 +50,8 @@ pub struct Broadcaster {
 impl Broadcaster {
     pub async fn new(config: Config) -> Broadcaster {
         Broadcaster {
+            pull_interval_range: (Duration::from_secs(5), Duration::from_secs(20)),
+            push_interval_range: (Duration::from_secs(5), Duration::from_secs(20)),
             view: Arc::new(RwLock::new(View::new(config.get_cache_size()))),
             knowledge_base: Vec::new(),
             config,
@@ -108,63 +113,28 @@ impl Broadcaster {
             };
         }
 
-        // instantiate push pull interval timers
-        let mut push_interval = interval(Duration::from_secs(10));
-        let mut pull_interval = interval(Duration::from_secs(15));
-        let p2p_push_pull_clone = p2p_server.clone();
-        let view_push_pull_clone = view.clone();
         // Gossip Push&Pull loop for spread and acquisition of information (Rule number 21 :)
+        let p2p_push_pull = p2p_server.clone();
+        let view_push_pull = view.clone();
         tokio::spawn(async move {
-            loop {
-                // TODO: stop this loop if server is down
-
-                tokio::select! {
-                    _ = push_interval.tick() => {
-                        let snapshot = view_push_pull_clone.clone().read().await.clone();
-
-                        // skip push if nothing to push
-                        if snapshot.known_peers.len() <= 0 {
-                            debug!("not enough peers to push");
-                            continue;
-                        }
-
-                        let rumor = snapshot.into_rumor();
-
-                        // push current view to a random peer
-                        match p2p_push_pull_clone.push(rumor).await {
-                            Ok(_) => debug!("push completed"),
-                            Err(err) => error!("push failed {}", err),
-                        };
-                    }
-
-                    _ = pull_interval.tick() => {
-                        match p2p_push_pull_clone.pull().await {
-                            Ok(_) => debug!("pull completed"),
-                            Err(err) => error!("pull failed {}", err),
-                        };
-                    }
-
-                    pull_request_msg = pull_request_rx.recv() => {
-                        match &pull_request_msg {
-                            Some((identity, req)) => {
-                                debug!("received pull request from {}", p2p::peer::peer_into_str(*identity));
-                                let snapshot = view_push_pull_clone.clone().read().await.clone();
-
-                                let rumor = snapshot.into_rumor();
-                                _ = p2p_push_pull_clone.send_to_peer(*identity, p2p::message::envelope::Msg::PullResponse(rumor)).await;
-                            }
-                            _ => ()
-                        }
-                    }
-                }
-            }
+            Self::run_gossip_push_pull(view_push_pull, p2p_push_pull, pull_request_rx).await;
         });
-
         // TODO: send knowledge item when: new peer arrives, new knowledge item arrives -> integrate into main control loop
 
         // Main control loop handling interaction between P2P and API submodules
         let mut knowledge_base =
             KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree());
+
+        // TODO: remove after knowledge_base sync actually works
+        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        _ = knowledge_base.update_sent_item_to_peers(
+            p2p::message::Data {
+                ttl: 2,
+                data_type: 12,
+                payload: random_bytes,
+            },
+            Vec::new(),
+        );
 
         // control loop
         loop {
@@ -222,18 +192,21 @@ impl Broadcaster {
                                 // Data items will be added to the knowledge base after completing the verification step
                                 // within the P2P module
                                 p2p::message::envelope::Msg::Data(mut data) => {
-                                    // check if ttl is 0; if yes, drop
-                                    // TODO: @wlad: is this correct ttl handling?
-                                    if data.ttl == 1 {
-                                        info!("dropping incoming broadcast message as ttl is 0");
+                                    // ignore message items that we already know about
+                                    if knowledge_base.is_known_item(&data) {
+                                        debug!("skipping data item, already known");
                                         continue
-                                    } else {
-                                        // decrement ttl
+                                    }
+
+                                    // if TTL is larger 1 decrement
+                                    // if TTL = 0 -> endless broadcasting
+                                    if data.ttl > 1 {
                                         data.ttl -= 1;
                                     }
+
                                     // for now only forward message to api
                                     if let Err(e) = publisher.publish(
-                                        crate::common::Data { data_type: (data.data_type as u16), data: bytes::Bytes::from(data.payload) })
+                                        crate::common::Data { data_type: (data.data_type as u16), data: bytes::Bytes::from(data.payload.clone()) })
                                         .await {
                                         match e {
                                             publisher::Error::ApiServerError(e) => {
@@ -249,45 +222,23 @@ impl Broadcaster {
                                             },
                                         }
                                     };
-                                    // TODO: @wlad how do we make sure we don't broadcast the message back to the sender? (avoid echo)
-                                    // TODO: duplicate code
-                                    // let reached_peers = p2p_server.broadcast(data).await.unwrap_or_else(|e| {
-                                    //     error!("failed to broadcast msg to peers: {}", e);
-                                    //     vec![]
-                                    // });
-                                    // knowledge_base.update_sent_item_to_peers(data, reached_peers)
-                                    //     .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
-                                    // TODO: add messages for verification tracking
+
+                                    // do not add TTL=1 items to knowledge_base since they are considered distributed
+                                    // and should not be propogated
+                                    if data.ttl == 1 {
+                                        continue
+                                    }
+
+                                    // add item to knowledge_base for distribution between peers
+                                    knowledge_base.update_sent_item_to_peers(data, [identity].to_vec())
+                                        .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                                 },
                                 // Rumors are used to update the peers view of the "world"
                                 // these messages might be received via a Push or Pull (asynchronously after pull request)
                                 p2p::message::envelope::Msg::PullResponse(rumor) |
                                 p2p::message::envelope::Msg::Rumor(rumor) => {
                                     view.clone().write().await.merge(rumor);
-                                    view.clone().read().await.print();
-
-                                    // TODO: move somewhere else
-                                    // connect to unconnected peers
-                                    for (id, peer) in &view.clone().read().await.known_peers {
-                                        // skip if is self
-                                        if *id == p2p_server.get_identity() {
-                                            continue;
-                                        }
-
-                                        if peer.is_active() {
-                                            continue;
-                                        }
-
-                                        if let Some(peer_addr) = peer.get_addr() {
-                                            info!("connecting to newly found peer {:?}", peer_addr);
-                                            match p2p_server.connect(peer_addr).await {
-                                                Ok(_) => info!("connected to peer"),
-                                                Err(err) => error!("could not connect to peer {}", err)
-                                            }
-                                        }
-
-
-                                    }
+                                    info!("{}", view.clone().read().await);
                                 }
                                 p2p::message::envelope::Msg::Pull(req) => {
                                     _ = pull_request_tx.send((identity, req)).await;
@@ -298,16 +249,16 @@ impl Broadcaster {
                         // ignore empty results
                         _ => ()
                     }
-                    // todo!("broadcast via p2p")
+
+                    info!("{}", knowledge_base);
                 }
 
 
                 p2p_connection_update_msg = p2p_broadcaster_connection_rx.recv() => {
                     match p2p_connection_update_msg {
                         Some((identity, status, peer)) => {
-                            info!("received peer update");
                             view.clone().write().await.process_peer_update(identity, status, peer);
-                            view.clone().read().await.print();
+                            info!("{}", view.clone().read().await);
                         }
                         // ignore empty results
                         _ => ()
@@ -315,6 +266,121 @@ impl Broadcaster {
                 }
 
             };
+
+            // connect to newly discoved peers
+            Self::connect_to_peers(view.clone(), p2p_server.clone()).await;
+
+            // spread knowledge base
+            let active_peers = p2p_server.get_active_peer_identities().await;
+            for identity in active_peers {
+                let items = knowledge_base.get_peer_unsent_items(identity);
+                for item in items {
+                    match p2p_server
+                        .send_to_peer(identity, p2p::message::envelope::Msg::Data(item.clone()))
+                        .await
+                    {
+                        Ok(_) => {
+                            _ = knowledge_base.update_sent_item_to_peers(item, [identity].to_vec());
+                        }
+                        Err(_) => (),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn connect_to_peers(view: Arc<RwLock<View>>, p2p: Arc<p2p::server::Server>) {
+        let v = view.read().await;
+
+        let mut failed_connections: Vec<p2p::peer::PeerIdentity> = Vec::new();
+        // TODO: move somewhere else
+        // connect to unconnected peers
+        for (id, peer) in &v.known_peers {
+            // skip if node is our own p2p server
+            if *id == p2p.get_identity() {
+                continue;
+            }
+
+            // skip already connected nodes
+            if peer.is_active() {
+                continue;
+            }
+
+            if let Some(peer_addr) = peer.get_addr() {
+                info!("connecting to newly found peer {:?}", peer_addr);
+                match p2p.connect(peer_addr).await {
+                    Ok(_) => info!("connected to peer"),
+                    // if connection to peer fails remove from knowledge base
+                    Err(_) => {
+                        failed_connections.push(id.clone());
+                    }
+                }
+            }
+        }
+        drop(v);
+
+        // remove all failed connections from view
+        if failed_connections.len() > 0 {
+            let mut view = view.write().await;
+            for identity in failed_connections {
+                _ = view.remove_peer(&identity);
+            }
+        }
+    }
+
+    async fn run_gossip_push_pull(
+        view: Arc<RwLock<View>>,
+        p2p: Arc<p2p::server::Server>,
+        mut pull_rx: mpsc::Receiver<(p2p::peer::PeerIdentity, p2p::message::PullRequest)>,
+    ) {
+        // instantiate push pull interval timers
+
+        let mut push_interval = interval(Duration::from_secs(10));
+        let mut pull_interval = interval(Duration::from_secs(15));
+        let view_push_pull_clone = view.clone();
+
+        loop {
+            // TODO: stop this loop if server is down
+
+            tokio::select! {
+                _ = push_interval.tick() => {
+                    let snapshot = view_push_pull_clone.clone().read().await.clone();
+
+                    // skip push if nothing to push
+                    if snapshot.known_peers.len() <= 0 {
+                        debug!("not enough peers to push");
+                        continue;
+                    }
+
+                    let rumor = snapshot.into_rumor();
+
+                    // push current view to a random peer
+                    match p2p.push(rumor).await {
+                        Ok(_) => debug!("push completed"),
+                        Err(err) => error!("push failed {}", err),
+                    };
+                }
+
+                _ = pull_interval.tick() => {
+                    match p2p.pull().await {
+                        Ok(_) => debug!("pull completed"),
+                        Err(err) => error!("pull failed {}", err),
+                    };
+                }
+
+                pull_request_msg = pull_rx.recv() => {
+                    match &pull_request_msg {
+                        Some((identity, req)) => {
+                            debug!("received pull request from {}", p2p::peer::peer_into_str(*identity));
+                            let snapshot = view_push_pull_clone.clone().read().await.clone();
+
+                            let rumor = snapshot.into_rumor();
+                            _ = p2p.send_to_peer(*identity, p2p::message::envelope::Msg::PullResponse(rumor)).await;
+                        }
+                        _ => ()
+                    }
+                }
+            }
         }
     }
 }

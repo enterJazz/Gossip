@@ -1,5 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    fmt::{self, Display},
     hash::{Hash, Hasher},
 };
 use thiserror::Error;
@@ -99,6 +100,22 @@ pub struct KnowledgeItem {
     sent_to: Vec<peer::PeerIdentity>,
 }
 
+impl Display for KnowledgeItem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Use `self.number` to refer to each positional data point.
+        write!(
+            f,
+            "[{}] [send_to_peers:{}])",
+            self.id,
+            self.sent_to
+                .iter()
+                .map(|i| { peer::peer_into_str(*i).to_string() })
+                .collect::<Vec<String>>()
+                .join(",")
+        )
+    }
+}
+
 impl KnowledgeBase {
     pub fn new(capacity: usize, degree: usize) -> Self {
         let rb = KnowledgeRingBuffer::new(capacity);
@@ -125,6 +142,11 @@ impl KnowledgeBase {
         }
         self.rb.push(knowledge_item.clone());
         Ok(())
+    }
+
+    pub fn is_known_item(&self, data_item: &Data) -> bool {
+        let data_hash = KnowledgeItem::gen_data_item_id(data_item);
+        self.contains(data_hash)
     }
 
     fn contains(&self, data_hash: u64) -> bool {
@@ -181,6 +203,31 @@ impl KnowledgeBase {
             }
         }
         Ok(())
+    }
+}
+
+impl Display for KnowledgeBase {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        _ = writeln!(f, "");
+        _ = writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        );
+        _ = writeln!(
+            f,
+            "                             knowledge base                                 "
+        );
+        _ = writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        );
+        for item in &self.rb.get_storage() {
+            _ = writeln!(f, "{}", item);
+        }
+        writeln!(
+            f,
+            "----------------------------------------------------------------------------"
+        )
     }
 }
 
