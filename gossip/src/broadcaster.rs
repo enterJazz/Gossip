@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::{
     io,
     net::TcpListener,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, Mutex, RwLock},
     time::{interval, Interval},
 };
 
@@ -32,8 +32,8 @@ pub enum BroadcasterError {
 }
 
 pub struct Broadcaster {
-    pull_interval_range: (Duration, Duration),
-    push_interval_range: (Duration, Duration),
+    pull_interval: Duration,
+    push_interval: Duration,
 
     // broadcaster_api_tx: mpsc::Sender<api::message::ApiMessage>,
     // api_broadcaster_rx: mpsc::Receiver<Result<api::message::ApiMessage, api::message::Error>>,
@@ -44,16 +44,19 @@ pub struct Broadcaster {
     view: Arc<RwLock<View>>,
 
     // some hashmap of messages and which peers it was sent to ; s.t. we know if `degree` peers was reached (in this case we can remove message)
-    knowledge_base: Vec<KnowledgeItem>,
+    knowledge_base: Arc<RwLock<KnowledgeBase>>,
 }
 
 impl Broadcaster {
     pub async fn new(config: Config) -> Broadcaster {
         Broadcaster {
-            pull_interval_range: (Duration::from_secs(5), Duration::from_secs(20)),
-            push_interval_range: (Duration::from_secs(5), Duration::from_secs(20)),
+            pull_interval: Duration::from_secs(5),
+            push_interval: Duration::from_secs(15),
             view: Arc::new(RwLock::new(View::new(config.get_cache_size()))),
-            knowledge_base: Vec::new(),
+            knowledge_base: Arc::new(RwLock::new(KnowledgeBase::new(
+                config.get_cache_size(),
+                config.get_degree(),
+            ))),
             config,
         }
     }
@@ -116,31 +119,27 @@ impl Broadcaster {
                 Err(err) => error!("failed to connect to bootstrapping node {}", err),
             };
         }
+        let knowledge_base = self.knowledge_base.clone();
 
         // Gossip Push&Pull loop for spread and acquisition of information (Rule number 21 :)
         let p2p_push_pull = p2p_server.clone();
         let view_push_pull = view.clone();
+
+        let pull_duration = self.pull_interval;
+        let push_duration = self.push_interval;
+
         tokio::spawn(async move {
-            Self::run_gossip_push_pull(view_push_pull, p2p_push_pull, pull_request_rx).await;
+            Self::run_gossip_push_pull(
+                view_push_pull,
+                p2p_push_pull,
+                pull_request_rx,
+                pull_duration,
+                push_duration,
+            )
+            .await;
         });
-        // TODO: send knowledge item when: new peer arrives, new knowledge item arrives -> integrate into main control loop
 
         // Main control loop handling interaction between P2P and API submodules
-        let mut knowledge_base =
-            KnowledgeBase::new(self.config.get_cache_size(), self.config.get_degree());
-
-        // TODO: remove after knowledge_base sync actually works
-        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
-        _ = knowledge_base.update_sent_item_to_peers(
-            p2p::message::Data {
-                ttl: 2,
-                data_type: 12,
-                payload: random_bytes,
-            },
-            Vec::new(),
-        );
-
-        // control loop
         loop {
             tokio::select! {
                 incoming_api_msg = api_broadcaster_rx.recv() => {
@@ -155,15 +154,16 @@ impl Broadcaster {
                                 })
                                 .await
                                 .unwrap_or_else(|e| {error!("failed to publish announce within node: {}", e.to_string())});
-                                
+
                             let data = p2p_msg_from_api(msg);
                             let reached_peers = p2p_server.broadcast(data.clone(), Vec::new()).await.unwrap_or_else(|e| {
                                 error!("failed to broadcast msg to peers: {}", e);
                                 vec![]
                             });
-                            knowledge_base.update_sent_item_to_peers(data, reached_peers)
+                            knowledge_base.write().await.update_sent_item_to_peers(data, reached_peers)
                                  .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                         },
+
                         // in case of incoming RPSPeer message:
                         // TODO: @wlad
                         Some(Ok(api::message::ApiMessage::RPSPeer(peer))) => {
@@ -184,7 +184,6 @@ impl Broadcaster {
                         Some(Ok(_)) => error!("received unexpected message from API in broadcaster"),
                         Some(Err(err)) => {
                             warn!("message invalid, forwarding prevented: {}", err);
-                            // TODO: handle invalid messages or do nothing
                         }
                         None => (),
                     }
@@ -197,20 +196,21 @@ impl Broadcaster {
                 // - peers sending messages here must have completed the PoW verification process
                 incoming_broadcast_msg = p2p_broadcaster_rx.recv() => {
                     match incoming_broadcast_msg {
-                        Some((msg, identity, addr)) => {
+                        Some((msg, identity, _)) => {
                             match msg {
                                 // Data messages from p2p module are forwarded here to the Api level for further processing
                                 // Data items will be added to the knowledge base after completing the verification step
                                 // within the P2P module
                                 p2p::message::envelope::Msg::Data(mut data) => {
                                     // ignore message items that we already know about
-                                    if knowledge_base.is_known_item(&data) {
+                                    if knowledge_base.read().await.is_known_item(&data) {
                                         debug!("skipping data item, already known");
                                         continue
                                     }
 
                                     // if TTL is larger 1 decrement
-                                    // if TTL = 0 -> endless broadcasting
+                                    // if TTL = 0 -> endless broadcasting -> do nothing
+                                    // if TTL = 1 retransmission will be stopped after publish
                                     if data.ttl > 1 {
                                         data.ttl -= 1;
                                     }
@@ -241,7 +241,7 @@ impl Broadcaster {
                                     }
 
                                     // add item to knowledge_base for distribution between peers
-                                    knowledge_base.update_sent_item_to_peers(data, [identity].to_vec())
+                                    knowledge_base.write().await.update_sent_item_to_peers(data, [identity].to_vec())
                                         .unwrap_or_else(|e| error!("failed to push knowledge item: {}", e));
                                 },
                                 // Rumors are used to update the peers view of the "world"
@@ -261,7 +261,7 @@ impl Broadcaster {
                         _ => ()
                     }
 
-                    info!("{}", knowledge_base);
+                    info!("{}", knowledge_base.read().await);
                 }
 
 
@@ -284,20 +284,43 @@ impl Broadcaster {
             // spread knowledge base
             let active_peers = p2p_server.get_active_peer_identities().await;
             for identity in active_peers {
-                let items = knowledge_base.get_peer_unsent_items(identity);
+                let items = knowledge_base.read().await.get_peer_unsent_items(identity);
                 for item in items {
                     match p2p_server
                         .send_to_peer(identity, p2p::message::envelope::Msg::Data(item.clone()))
                         .await
                     {
                         Ok(_) => {
-                            _ = knowledge_base.update_sent_item_to_peers(item, [identity].to_vec());
+                            _ = knowledge_base
+                                .write()
+                                .await
+                                .update_sent_item_to_peers(item, [identity].to_vec());
                         }
                         Err(_) => (),
                     }
                 }
             }
         }
+    }
+
+    pub async fn insert_data_item(&self, item: p2p::message::Data) {
+        _ = self
+            .knowledge_base
+            .write()
+            .await
+            .update_sent_item_to_peers(item, Vec::new());
+    }
+
+    /// Insert random data item for testing
+    pub async fn inser_random_item(&self) -> Vec<u8> {
+        let random_bytes: Vec<u8> = (0..1024).map(|_| rand::random::<u8>()).collect();
+        self.insert_data_item(p2p::message::Data {
+            ttl: 2,
+            data_type: 1337,
+            payload: random_bytes.clone(),
+        })
+        .await;
+        random_bytes
     }
 
     async fn connect_to_peers(view: Arc<RwLock<View>>, p2p: Arc<p2p::server::Server>) {
@@ -343,11 +366,13 @@ impl Broadcaster {
         view: Arc<RwLock<View>>,
         p2p: Arc<p2p::server::Server>,
         mut pull_rx: mpsc::Receiver<(p2p::peer::PeerIdentity, p2p::message::PullRequest)>,
+        push_duration: Duration,
+        pull_duration: Duration,
     ) {
         // instantiate push pull interval timers
 
-        let mut push_interval = interval(Duration::from_secs(10));
-        let mut pull_interval = interval(Duration::from_secs(15));
+        let mut push_interval = interval(push_duration);
+        let mut pull_interval = interval(pull_duration);
         let view_push_pull_clone = view.clone();
 
         loop {

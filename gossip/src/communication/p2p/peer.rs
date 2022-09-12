@@ -27,7 +27,7 @@ use super::{
     pow::CHALLENGE_LEN,
 };
 
-const POW_DIFFICULTY: u32 = 1;
+const POW_DIFFICULTY: u32 = 2;
 const POW_TIMEOUT: u64 = 20;
 
 /// Peer identity is a Blake3 hahs of a peers public key
